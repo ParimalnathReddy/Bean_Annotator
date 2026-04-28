@@ -1,0 +1,1057 @@
+"""
+annotation.py — Bean Quality Annotator
+
+Run:
+    streamlit run annotate_beans.py --server.port 8501
+
+Requires:
+    pip install streamlit pillow streamlit-drawable-canvas
+"""
+
+from __future__ import annotations
+
+import base64
+import csv
+import io
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import streamlit as st
+import streamlit.components.v1 as components
+from PIL import Image, ImageDraw
+
+try:
+    from streamlit_drawable_canvas import st_canvas
+except ImportError:
+    st_canvas = None
+
+try:
+    import streamlit.elements.image as st_image
+    from streamlit.elements.lib.image_utils import image_to_url as _image_to_url
+    from streamlit.elements.lib.layout_utils import LayoutConfig
+
+    if not hasattr(st_image, "image_to_url"):
+        def image_to_url_compat(image, width, clamp, channels, output_format, image_id):
+            return _image_to_url(image, LayoutConfig(width=width), clamp, channels, output_format, image_id)
+        st_image.image_to_url = image_to_url_compat
+except Exception:
+    pass
+
+
+BORDER_WIDTH     = 8
+MAX_CANVAS_WIDTH = 760
+MIN_CANVAS_WIDTH = 620
+MIN_DEFECT_AREA  = 25
+ANNOTATION_VER   = 3
+RESAMPLE         = getattr(Image, "Resampling", Image).LANCZOS
+
+CONFIG_FILE = Path.home() / ".bean_annotator.json"
+
+
+def load_config() -> dict:
+    try:
+        with CONFIG_FILE.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(crops_dir: str, output_dir: str, annotator: str) -> None:
+    try:
+        with CONFIG_FILE.open("w", encoding="utf-8") as f:
+            json.dump({"crops_dir": crops_dir, "output_dir": output_dir, "annotator": annotator}, f)
+    except OSError:
+        pass
+
+DEFECT_TYPES = [
+    "Crack", "Hole", "Discoloration", "Mold", "Spot",
+    "Broken", "Wrinkle", "Insect Damage", "Foreign Matter", "Other",
+]
+
+SEVERITY = {
+    1: {"label": "Excellent", "color": "#16a34a", "fg": "#fff",
+        "desc": "Intact, clean, evenly colored. No defects. Highest quality grade."},
+    2: {"label": "Very Good", "color": "#65a30d", "fg": "#fff",
+        "desc": "Minor cosmetic variation only. No structural defect or contamination."},
+    3: {"label": "Moderate",  "color": "#d97706", "fg": "#fff",
+        "desc": "Limited visible flaw — small crack, spot, wrinkle, or mild discoloration."},
+    4: {"label": "Poor",      "color": "#ea580c", "fg": "#fff",
+        "desc": "Prominent damage, breakage, or discoloration. Likely downgraded or rejected."},
+    5: {"label": "Severe",    "color": "#dc2626", "fg": "#fff",
+        "desc": "Clearly unusable. Severe defect, mold, major breakage, or contamination."},
+}
+
+STEPS = [
+    ("Inspect",       "Open the zoom viewer. Scroll to zoom, drag to pan, double-click to reset."),
+    ("Rate",          "Assign the overall severity from 1 (Excellent) to 5 (Severe)."),
+    ("Draw defects",  "Switch to Draw tab. Draw a rectangle or polygon around each defect."),
+    ("Label defects", "For each shape select the defect type, local severity, and add notes."),
+    ("Save",          "Click Save. A JSON file is written and labels.csv is updated."),
+]
+
+PANEL_STEPS = {
+    "Inspect & Rate": {0, 1},
+    "Draw Defects":   {2, 3},
+    "Saved JSON":     {4},
+}
+
+# ── Stylesheet ────────────────────────────────────────────────────────────────
+
+CSS = """
+<style>
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+.block-container { padding-top:1.25rem !important; padding-bottom:3rem !important; max-width:1200px !important; }
+h1 { font-size:1.2rem !important; font-weight:700 !important; letter-spacing:-0.02em; color:#0f172a; }
+h2 { font-size:1rem !important; font-weight:700 !important; color:#0f172a; }
+h3, h4 { font-size:0.88rem !important; font-weight:600 !important; color:#374151; }
+button { border-radius:5px !important; font-size:0.82rem !important; font-weight:500 !important; }
+button[kind="primary"] { background:#0f172a !important; border:1px solid #0f172a !important; color:#fff !important; font-weight:600 !important; }
+button[kind="primary"]:hover { background:#1e293b !important; }
+button[kind="secondary"] { background:#fff !important; border:1px solid #d1d5db !important; color:#374151 !important; }
+button[kind="secondary"]:hover { background:#f9fafb !important; }
+.stTextInput label, .stTextArea label, .stSelectbox label,
+.stNumberInput label, .stRadio label span, .stCheckbox label span {
+    font-size:0.78rem !important; font-weight:600 !important; color:#374151 !important;
+}
+div[data-testid="stProgress"] > div { height:2px !important; background:#e5e7eb !important; border-radius:0 !important; }
+div[data-testid="stProgress"] > div > div { background:#0f172a !important; border-radius:0 !important; }
+div[data-testid="stMetric"] { background:transparent !important; padding:0 !important; }
+div[data-testid="stMetricValue"] { font-size:1.35rem !important; font-weight:700 !important; color:#0f172a !important; }
+div[data-testid="stMetricLabel"] { font-size:0.72rem !important; font-weight:500 !important; color:#6b7280 !important; }
+.stCaption p { font-size:0.75rem !important; color:#9ca3af !important; }
+hr { border:none !important; border-top:1px solid #f3f4f6 !important; margin:0.75rem 0 !important; }
+details { border:1px solid #e5e7eb !important; border-radius:6px !important; overflow:hidden; }
+details summary { font-size:0.8rem !important; font-weight:600 !important; color:#374151 !important; padding:10px 14px !important; background:#f9fafb !important; cursor:pointer; }
+details[open] summary { border-bottom:1px solid #e5e7eb !important; }
+details > div { padding:14px !important; }
+div[data-testid="stToast"] { border-radius:6px !important; font-size:0.82rem !important; font-weight:500 !important; border:1px solid #e5e7eb !important; }
+div[data-testid="stDataFrame"] { border:1px solid #e5e7eb !important; border-radius:6px !important; overflow:hidden; }
+div[data-testid="stRadio"] > div { gap:8px !important; }
+div[data-testid="stRadio"] label { font-size:0.82rem !important; }
+/* ── Sidebar — light theme ── */
+section[data-testid="stSidebar"] { background:#f8fafc !important; border-right:1px solid #e2e8f0 !important; min-width:248px !important; }
+section[data-testid="stSidebar"] .stMarkdown p,
+section[data-testid="stSidebar"] .stMarkdown li,
+section[data-testid="stSidebar"] small,
+section[data-testid="stSidebar"] .stCaption p { color:#64748b !important; font-size:0.78rem !important; }
+section[data-testid="stSidebar"] strong, section[data-testid="stSidebar"] b { color:#0f172a !important; }
+section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3, section[data-testid="stSidebar"] h4 { color:#0f172a !important; }
+section[data-testid="stSidebar"] hr { border-color:#e2e8f0 !important; }
+section[data-testid="stSidebar"] div[data-testid="stMetricValue"] { color:#0f172a !important; font-size:1.3rem !important; }
+section[data-testid="stSidebar"] div[data-testid="stMetricLabel"] { color:#64748b !important; }
+section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] label span { color:#374151 !important; }
+section[data-testid="stSidebar"] div[data-testid="stProgress"] > div { background:#e2e8f0 !important; }
+section[data-testid="stSidebar"] div[data-testid="stProgress"] > div > div { background:#2563eb !important; }
+section[data-testid="stSidebar"] .stButton button { background:#fff !important; border:1px solid #d1d5db !important; color:#374151 !important; font-size:0.8rem !important; }
+section[data-testid="stSidebar"] .stButton button:hover { background:#f1f5f9 !important; border-color:#94a3b8 !important; }
+</style>
+"""
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _html(content: str) -> None:
+    """Render a pre-built HTML string. Uses st.html if available, otherwise markdown."""
+    if hasattr(st, "html"):
+        st.html(content)
+    else:
+        st.markdown(content, unsafe_allow_html=True)
+
+
+def _col_html(col: Any, content: str) -> None:
+    """Same as _html but into a column context."""
+    if hasattr(col, "html"):
+        col.html(content)
+    else:
+        col.markdown(content, unsafe_allow_html=True)
+
+
+def severity_color(sev: int | None) -> str:
+    return SEVERITY.get(sev, {}).get("color", "#64748b")
+
+
+def hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return tuple(int(h[i: i + 2], 16) for i in (0, 2, 4))
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def mask_id_of(path: Path) -> str:
+    return path.stem
+
+
+def ann_path(ann_dir: Path, mask_id: str) -> Path:
+    return ann_dir / f"{mask_id}.json"
+
+
+def blank_annotation(mask_id: str) -> dict[str, Any]:
+    return {
+        "annotation_version": ANNOTATION_VER,
+        "mask_id":            mask_id,
+        "overall_severity":   None,
+        "overall_notes":      "",
+        "defects":            [],
+        "skip":               {"skipped": False, "reason": ""},
+        "timestamp":          None,
+        "annotator":          "",
+    }
+
+
+def load_annotation(ann_dir: Path, mask_id: str) -> dict[str, Any]:
+    path = ann_path(ann_dir, mask_id)
+    if not path.exists():
+        return blank_annotation(mask_id)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return blank_annotation(mask_id)
+    merged = blank_annotation(mask_id)
+    merged.update(data)
+    merged["defects"] = data.get("defects", []) or []
+    merged["skip"]    = data.get("skip") or {"skipped": False, "reason": ""}
+    return merged
+
+
+def load_all(ann_dir: Path) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not ann_dir.exists():
+        return result
+    for p in sorted(ann_dir.glob("*.json")):
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        result[str(data.get("mask_id") or p.stem)] = data
+    return result
+
+
+def is_done(ann: dict[str, Any]) -> bool:
+    return bool(ann.get("skip", {}).get("skipped")) or ann.get("overall_severity") in SEVERITY
+
+
+def save_annotation(ann_dir: Path, ann: dict[str, Any]) -> None:
+    ann_dir.mkdir(parents=True, exist_ok=True)
+    ann["timestamp"] = utc_now()
+    with ann_path(ann_dir, ann["mask_id"]).open("w", encoding="utf-8") as f:
+        json.dump(ann, f, indent=2)
+
+
+def add_border(img: Image.Image, sev: int | None, width: int = BORDER_WIDTH) -> Image.Image:
+    out   = img.copy().convert("RGB")
+    color = hex_to_rgb(severity_color(sev))
+    draw  = ImageDraw.Draw(out)
+    w, h  = out.size
+    for i in range(width):
+        draw.rectangle([i, i, w - 1 - i, h - 1 - i], outline=color)
+    return out
+
+
+def save_labeled_crop(img: Image.Image, mask_id: str, sev: int, labeled_dir: Path) -> None:
+    dest = labeled_dir / f"severity_{sev}"
+    dest.mkdir(parents=True, exist_ok=True)
+    add_border(img, sev).save(dest / f"{mask_id}.png")
+
+
+_CSV_FIELDS = [
+    "mask_id", "overall_severity", "severity_label", "defect_count",
+    "skipped", "skip_reason", "overall_notes", "timestamp", "annotator",
+]
+
+
+def _csv_row(mask_id: str, ann: dict[str, Any]) -> dict:
+    sev = ann.get("overall_severity")
+    return {
+        "mask_id":          mask_id,
+        "overall_severity": sev or "",
+        "severity_label":   SEVERITY.get(sev, {}).get("label", ""),
+        "defect_count":     len(ann.get("defects", []) or []),
+        "skipped":          bool(ann.get("skip", {}).get("skipped")),
+        "skip_reason":      ann.get("skip", {}).get("reason", ""),
+        "overall_notes":    ann.get("overall_notes", ""),
+        "timestamp":        ann.get("timestamp", ""),
+        "annotator":        ann.get("annotator", ""),
+    }
+
+
+def write_csv(csv_path: Path, files: list[Path], annotations: dict[str, dict[str, Any]]) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
+        w.writeheader()
+        for p in files:
+            mid = mask_id_of(p)
+            w.writerow(_csv_row(mid, annotations.get(mid, blank_annotation(mid))))
+
+
+def csv_bytes(files: list[Path], annotations: dict[str, dict[str, Any]]) -> bytes:
+    buf = io.StringIO()
+    w   = csv.DictWriter(buf, fieldnames=_CSV_FIELDS)
+    w.writeheader()
+    for p in files:
+        mid = mask_id_of(p)
+        w.writerow(_csv_row(mid, annotations.get(mid, blank_annotation(mid))))
+    return buf.getvalue().encode("utf-8")
+
+
+def img_data_url(img: Image.Image) -> str:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
+
+
+def next_unfinished(files: list[Path], annotations: dict[str, dict[str, Any]], start: int) -> int:
+    for i in range(start, len(files)):
+        mid = mask_id_of(files[i])
+        if not is_done(annotations.get(mid, blank_annotation(mid))):
+            return i
+    return min(start, len(files) - 1)
+
+
+# ── Zoom viewer ───────────────────────────────────────────────────────────────
+
+def zoom_viewer(img: Image.Image, key: str) -> None:
+    url = img_data_url(img)
+    components.html(
+        f"""
+        <div id="z{key}" style="position:relative;width:100%;height:500px;background:#0d1117;border:1px solid #21262d;border-radius:6px;overflow:hidden;">
+          <canvas style="width:100%;height:100%;display:block;cursor:grab;"></canvas>
+          <div id="hud{key}" style="position:absolute;right:10px;bottom:10px;padding:4px 9px;background:rgba(0,0,0,0.55);color:#c9d1d9;font:11px/1.5 'SF Mono','Fira Code',monospace;border-radius:4px;border:1px solid rgba(255,255,255,0.07);pointer-events:none;">100%</div>
+        </div>
+        <script>
+        (function() {{
+          const root = document.getElementById("z{key}");
+          const canvas = root.querySelector("canvas");
+          const hud = document.getElementById("hud{key}");
+          const ctx = canvas.getContext("2d");
+          const img = new Image();
+          let sc=1, base=1, ox=0, oy=0, drag=false, lx=0, ly=0;
+          function fit() {{
+            const r=root.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
+            canvas.width=Math.max(1,r.width*dpr|0); canvas.height=Math.max(1,r.height*dpr|0);
+            ctx.setTransform(dpr,0,0,dpr,0,0);
+            base=Math.min(r.width/img.width, r.height/img.height); sc=base;
+            ox=(r.width-img.width*sc)/2; oy=(r.height-img.height*sc)/2; draw();
+          }}
+          function draw() {{
+            const r=root.getBoundingClientRect();
+            ctx.clearRect(0,0,r.width,r.height);
+            ctx.imageSmoothingEnabled=true;
+            ctx.drawImage(img,ox,oy,img.width*sc,img.height*sc);
+            hud.textContent=Math.round(sc/base*100)+"% · scroll: zoom · drag: pan · dbl-click: reset";
+          }}
+          img.onload=fit; img.src="{url}";
+          new ResizeObserver(fit).observe(root);
+          canvas.addEventListener("wheel",e=>{{
+            e.preventDefault();
+            const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top, prev=sc;
+            sc=Math.min(Math.max(base*0.5, sc*(e.deltaY<0?1.12:0.88)), base*14);
+            ox=mx-(mx-ox)/prev*sc; oy=my-(my-oy)/prev*sc; draw();
+          }},{{passive:false}});
+          canvas.addEventListener("mousedown",e=>{{drag=true;lx=e.clientX;ly=e.clientY;canvas.style.cursor="grabbing";}});
+          window.addEventListener("mouseup",()=>{{drag=false;canvas.style.cursor="grab";}});
+          window.addEventListener("mousemove",e=>{{if(!drag)return;ox+=e.clientX-lx;oy+=e.clientY-ly;lx=e.clientX;ly=e.clientY;draw();}});
+          canvas.addEventListener("dblclick",fit);
+        }})();
+        </script>
+        """,
+        height=520,
+    )
+
+
+# ── Drawing canvas ────────────────────────────────────────────────────────────
+
+def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tuple[list[dict], float]:
+    if st_canvas is None:
+        st.error("Install streamlit-drawable-canvas to use defect drawing.")
+        st.code("pip install streamlit-drawable-canvas")
+        return [], 1.0
+
+    w0, h0 = img.size
+    cw     = max(MIN_CANVAS_WIDTH, min(MAX_CANVAS_WIDTH, w0))
+    scale  = cw / w0 if w0 else 1.0
+    ch     = max(1, int(h0 * scale))
+    bg     = img.resize((cw, ch), RESAMPLE)
+
+    result = st_canvas(
+        fill_color="rgba(255,255,255,0.08)",
+        stroke_width=2, stroke_color=stroke,
+        background_image=bg, update_streamlit=True,
+        height=ch, width=cw, drawing_mode=mode,
+        point_display_radius=3, key=canvas_key,
+    )
+    objects = []
+    if result.json_data:
+        objects = result.json_data.get("objects", []) or []
+    return objects, scale
+
+
+def fabric_to_shape(obj: dict[str, Any], scale: float) -> dict[str, Any] | None:
+    t   = obj.get("type")
+    l   = float(obj.get("left", 0))
+    tp  = float(obj.get("top",  0))
+    w   = float(obj.get("width",  0)) * float(obj.get("scaleX", 1))
+    h   = float(obj.get("height", 0)) * float(obj.get("scaleY", 1))
+    inv = 1 / scale if scale else 1
+
+    if t == "rect":
+        x, y, rw, rh = round(l*inv,2), round(tp*inv,2), round(w*inv,2), round(h*inv,2)
+        if rw <= 1 or rh <= 1:
+            return None
+        return {"shape": "bbox", "bbox": {"x": x, "y": y, "width": rw, "height": rh}}
+
+    if t in {"polygon", "path"}:
+        pts = obj.get("points") or []
+        if pts:
+            poly = [{"x": round((l+float(p.get("x",0)))*inv,2), "y": round((tp+float(p.get("y",0)))*inv,2)} for p in pts]
+            if len(poly) >= 3:
+                return {"shape": "polygon", "polygon": poly}
+        elif obj.get("path"):
+            return {"shape": "path",
+                    "bbox": {"x": round(l*inv,2), "y": round(tp*inv,2), "width": round(w*inv,2), "height": round(h*inv,2)},
+                    "path": obj.get("path")}
+    return None
+
+
+def shape_area(s: dict[str, Any]) -> float:
+    if s.get("shape") in {"bbox", "path"}:
+        b = s.get("bbox") or {}
+        return float(b.get("width", 0)) * float(b.get("height", 0))
+    pts = s.get("polygon") or []
+    if len(pts) < 3:
+        return 0.0
+    area = 0.0
+    for i, p in enumerate(pts):
+        n = pts[(i + 1) % len(pts)]
+        area += float(p["x"]) * float(n["y"]) - float(n["x"]) * float(p["y"])
+    return abs(area) / 2
+
+
+def filter_shapes(objects: list[dict], scale: float) -> list[dict]:
+    out = []
+    for obj in objects:
+        s = fabric_to_shape(obj, scale)
+        if s and shape_area(s) >= MIN_DEFECT_AREA:
+            out.append(s)
+    return out
+
+
+# ── UI components ─────────────────────────────────────────────────────────────
+
+def severity_selector(current: int | None, key: str) -> int:
+    default  = current if current in SEVERITY else 3
+    selected = st.radio(
+        "Severity",
+        options=list(SEVERITY.keys()),
+        index=list(SEVERITY.keys()).index(default),
+        horizontal=True,
+        format_func=lambda v: f"{v} — {SEVERITY[v]['label']}",
+        key=key,
+        label_visibility="collapsed",
+    )
+    selected = int(selected)
+
+    # Colored severity strip — all style attrs on one line to avoid parser issues
+    cols = st.columns(5)
+    for level, col in zip(SEVERITY.keys(), cols):
+        meta   = SEVERITY[level]
+        is_sel = level == selected
+        border  = f"2px solid {meta['color']}" if is_sel else "2px solid transparent"
+        opacity = "1" if is_sel else "0.5"
+        ring    = f"box-shadow:0 0 0 3px {meta['color']}40;" if is_sel else ""
+        _col_html(col,
+            f'<div style="padding:10px 4px;border-radius:5px;border:{border};background:{meta["color"]};'
+            f'color:{meta["fg"]};text-align:center;opacity:{opacity};{ring}">'
+            f'<div style="font-size:1.1rem;font-weight:800;line-height:1;">{level}</div>'
+            f'<div style="font-size:0.62rem;font-weight:600;margin-top:4px;opacity:0.9;">{meta["label"]}</div>'
+            f'</div>'
+        )
+
+    # Description line for the selected level
+    meta = SEVERITY[selected]
+    _html(
+        f'<div style="margin-top:8px;padding:9px 13px;border-radius:5px;'
+        f'background:{meta["color"]}14;border-left:3px solid {meta["color"]};'
+        f'font-size:0.82rem;color:#374151;line-height:1.5;">'
+        f'<strong style="color:{meta["color"]};">Level {selected} — {meta["label"]}.</strong> {meta["desc"]}'
+        f'</div>'
+    )
+    return selected
+
+
+def guidelines_panel() -> None:
+    with st.expander("Severity reference"):
+        parts = []
+        for level, meta in SEVERITY.items():
+            parts.append(
+                f'<div style="display:flex;align-items:flex-start;gap:10px;'
+                f'padding:8px 0;border-bottom:1px solid #f3f4f6;">'
+                f'<div style="flex:0 0 52px;text-align:center;padding:5px 0;border-radius:4px;'
+                f'background:{meta["color"]};color:{meta["fg"]};font-weight:700;font-size:0.85rem;">{level}</div>'
+                f'<div><div style="font-weight:600;font-size:0.82rem;">{meta["label"]}</div>'
+                f'<div style="font-size:0.78rem;color:#6b7280;margin-top:2px;">{meta["desc"]}</div>'
+                f'</div></div>'
+            )
+        _html("".join(parts))
+
+
+def guide_panel(current_panel: str) -> None:
+    active = PANEL_STEPS.get(current_panel, set())
+    with st.expander("Annotation guide"):
+        for i, (title, desc) in enumerate(STEPS):
+            is_active = i in active
+            num_bg    = "#2563eb" if is_active else "#e5e7eb"
+            num_fg    = "#fff"    if is_active else "#6b7280"
+            row_bg    = "#eff6ff" if is_active else "transparent"
+            title_col = "#1d4ed8" if is_active else "#111827"
+            _html(
+                f'<div style="display:flex;align-items:flex-start;gap:10px;'
+                f'padding:9px 10px;border-radius:5px;margin-bottom:4px;background:{row_bg};">'
+                f'<div style="flex:0 0 22px;height:22px;border-radius:50%;background:{num_bg};color:{num_fg};'
+                f'font-size:0.7rem;font-weight:700;display:flex;align-items:center;justify-content:center;min-width:22px;">{i+1}</div>'
+                f'<div><div style="font-size:0.8rem;font-weight:600;color:{title_col};">{title}</div>'
+                f'<div style="font-size:0.75rem;color:#6b7280;margin-top:2px;">{desc}</div></div>'
+                f'</div>'
+            )
+
+
+def existing_defects_table(ann: dict[str, Any]) -> None:
+    defects = ann.get("defects", []) or []
+    if not defects:
+        st.caption("No defects saved yet.")
+        return
+    rows = [
+        {"#": i, "type": d.get("custom_name") or d.get("type", ""),
+         "severity": d.get("severity", ""), "shape": d.get("shape", ""), "notes": d.get("notes", "")}
+        for i, d in enumerate(defects, 1)
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+def defect_form(shapes: list[dict], prefix: str) -> list[dict[str, Any]]:
+    defects = []
+    for idx, shape in enumerate(shapes, 1):
+        bbox = shape.get("bbox", {})
+        loc  = f"x {bbox.get('x',0):.0f}, y {bbox.get('y',0):.0f}" if bbox else ""
+        loc_span = f'&nbsp;&nbsp;<span style="color:#9ca3af;">{loc}</span>' if loc else ""
+        _html(
+            f'<div style="padding:10px 13px;border-radius:5px;border:1px solid #e5e7eb;background:#f9fafb;margin:8px 0;">'
+            f'<span style="font-size:0.75rem;font-weight:600;color:#374151;">'
+            f'Shape {idx} &ndash; {shape.get("shape","").upper()}{loc_span}</span></div>'
+        )
+        if not st.checkbox("Include", value=True, key=f"{prefix}_inc_{idx}"):
+            continue
+
+        c1, c2, c3 = st.columns([1.4, 1, 1.3])
+        dtype = c1.selectbox("Type", DEFECT_TYPES, key=f"{prefix}_type_{idx}")
+        dsev  = c2.selectbox("Severity", list(SEVERITY.keys()), index=2,
+                             format_func=lambda v: f"{v} — {SEVERITY[v]['label']}",
+                             key=f"{prefix}_sev_{idx}")
+        if dtype == "Other":
+            custom = c3.text_input("Name", key=f"{prefix}_custom_{idx}")
+        else:
+            meta   = SEVERITY[dsev]
+            _col_html(c3,
+                f'<div style="margin-top:24px;padding:6px 9px;border-radius:4px;'
+                f'border-left:3px solid {meta["color"]};background:{meta["color"]}14;'
+                f'font-size:0.75rem;font-weight:500;color:#374151;">'
+                f'{meta["label"]}: {meta["desc"][:60]}…</div>'
+            )
+            custom = ""
+
+        notes = st.text_input("Notes", key=f"{prefix}_notes_{idx}",
+                              placeholder="Optional — e.g. 'near tip', '3 mm crack'")
+        entry: dict[str, Any] = {"type": dtype, "severity": int(dsev), "notes": notes.strip()}
+        if custom.strip():
+            entry["custom_name"] = custom.strip()
+        entry.update(shape)
+        defects.append(entry)
+    return defects
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+
+def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path: Path, current_mid: str = "") -> str:
+    total     = len(files)
+    completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
+    skipped   = sum(1 for a in annotations.values() if a.get("skip", {}).get("skipped"))
+    counts    = {k: sum(1 for a in annotations.values() if a.get("overall_severity") == k) for k in SEVERITY}
+    pct       = round(100 * completed / total) if total else 0
+
+    # Step completion state for the current bean
+    cur_ann  = annotations.get(current_mid, {})
+    has_sev  = cur_ann.get("overall_severity") is not None
+    has_def  = bool(cur_ann.get("defects"))
+    is_skip  = bool(cur_ann.get("skip", {}).get("skipped"))
+
+    with st.sidebar:
+        # ── Brand ──
+        _html(
+            '<div style="padding:18px 0 14px;">'
+            '<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Bean Quality</div>'
+            '<div style="font-size:1.1rem;font-weight:800;color:#0f172a;margin-top:3px;letter-spacing:-0.02em;">Annotator</div>'
+            '</div>'
+        )
+
+        _html('<div style="height:1px;background:#e2e8f0;margin-bottom:16px;"></div>')
+
+        # ── Step navigator ──
+        if "_switch_to_panel" in st.session_state:
+            st.session_state["workflow_panel"] = st.session_state.pop("_switch_to_panel")
+        if "workflow_panel" not in st.session_state:
+            st.session_state["workflow_panel"] = "Inspect & Rate"
+
+        panel = st.session_state["workflow_panel"]
+
+        step_defs = [
+            ("Inspect & Rate", "Inspect & Rate",
+             "Rate overall severity",      has_sev or is_skip),
+            ("Draw Defects",   "Draw Defects",
+             "Mark individual defects",    has_def or is_skip),
+            ("Saved JSON",     "Review JSON",
+             "Inspect saved record",       False),
+        ]
+
+        _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Steps</div>')
+
+        step_parts = []
+        for i, (panel_key, label, sub, step_done) in enumerate(step_defs, 1):
+            is_active = panel_key == panel
+            if step_done:
+                circle_bg  = "#16a34a"
+                circle_fg  = "#fff"
+                circle_val = "&#10003;"
+                label_col  = "#6b7280"
+                sub_col    = "#9ca3af"
+                row_bg     = "transparent"
+                row_border = "transparent"
+                left_bar   = "#16a34a"
+            elif is_active:
+                circle_bg  = "#2563eb"
+                circle_fg  = "#fff"
+                circle_val = str(i)
+                label_col  = "#1e40af"
+                sub_col    = "#3b82f6"
+                row_bg     = "#eff6ff"
+                row_border = "#bfdbfe"
+                left_bar   = "#2563eb"
+            else:
+                circle_bg  = "#fff"
+                circle_fg  = "#9ca3af"
+                circle_val = str(i)
+                label_col  = "#9ca3af"
+                sub_col    = "#cbd5e1"
+                row_bg     = "transparent"
+                row_border = "#e5e7eb"
+                left_bar   = "#e5e7eb"
+
+            step_parts.append(
+                f'<div style="display:flex;align-items:center;gap:11px;padding:9px 12px;'
+                f'border-radius:7px;background:{row_bg};border:1px solid {row_border};'
+                f'margin-bottom:4px;border-left:3px solid {left_bar};">'
+                f'<div style="flex:0 0 24px;height:24px;border-radius:50%;background:{circle_bg};'
+                f'color:{circle_fg};font-size:0.68rem;font-weight:800;display:flex;align-items:center;'
+                f'justify-content:center;min-width:24px;border:1.5px solid {row_border};">{circle_val}</div>'
+                f'<div>'
+                f'<div style="font-size:0.8rem;font-weight:{"700" if is_active else "500"};color:{label_col};line-height:1.2;">{label}</div>'
+                f'<div style="font-size:0.68rem;color:{sub_col};margin-top:2px;">{sub}</div>'
+                f'</div></div>'
+            )
+        _html("".join(step_parts))
+
+        _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
+
+        # ── Progress ──
+        _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px;">Progress</div>')
+        _html(
+            f'<div style="padding:14px 16px;background:#fff;border-radius:8px;border:1px solid #e2e8f0;margin-bottom:10px;">'
+            f'<div style="font-size:1.8rem;font-weight:900;color:#0f172a;line-height:1;">{pct}%</div>'
+            f'<div style="font-size:0.72rem;color:#64748b;margin-top:4px;">'
+            f'{completed} of {total} annotated &nbsp;·&nbsp; {skipped} skipped</div>'
+            f'</div>'
+        )
+        st.progress(completed / total if total else 0)
+
+        _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
+
+        # ── Severity breakdown ──
+        _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px;">By severity</div>')
+
+        sev_parts = []
+        for level, count in counts.items():
+            meta  = SEVERITY[level]
+            bar_w = round(100 * count / total) if total else 0
+            sev_parts.append(
+                f'<div style="margin-bottom:7px;">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">'
+                f'<span style="display:flex;align-items:center;gap:6px;font-size:0.75rem;color:#374151;">'
+                f'<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:{meta["color"]};"></span>'
+                f'{level} &ndash; {meta["label"]}</span>'
+                f'<span style="font-size:0.75rem;font-weight:700;color:#111827;">{count}</span></div>'
+                f'<div style="height:4px;background:#f1f5f9;border-radius:99px;">'
+                f'<div style="width:{bar_w}%;height:100%;background:{meta["color"]};border-radius:99px;"></div>'
+                f'</div></div>'
+            )
+        _html("".join(sev_parts))
+
+        _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
+
+        # ── Footer actions ──
+        st.download_button("Download labels.csv", data=csv_bytes(files, annotations),
+                           file_name="labels.csv", mime="text/csv", use_container_width=True)
+        st.caption(f"Auto-saved to {csv_path.name} after each save.")
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Change folder", use_container_width=True):
+            st.session_state["ready"] = False
+            st.rerun()
+
+    return panel
+
+
+# ── Setup page ────────────────────────────────────────────────────────────────
+
+def _try_start(crops: str, output: str, name: str) -> bool:
+    """Validate paths and start the session. Returns True on success."""
+    if not crops or not output:
+        st.error("Both folder paths are required.")
+        return False
+    crops_dir = Path(crops).expanduser()
+    out_dir   = Path(output).expanduser()
+    if not crops_dir.exists():
+        st.error(f"Crops folder not found: {crops_dir}")
+        return False
+    files = sorted(crops_dir.glob("*.png"))
+    if not files:
+        st.error(f"No PNG files found in {crops_dir}.")
+        return False
+    save_config(str(crops_dir), str(out_dir), name.strip())
+    st.session_state.update({"crops_dir": str(crops_dir), "output_dir": str(out_dir),
+                              "annotator": name.strip(), "ready": True})
+    return True
+
+
+def setup_page() -> None:
+    cfg = load_config()
+    last_crops  = cfg.get("crops_dir",  "")
+    last_output = cfg.get("output_dir", "")
+    last_name   = cfg.get("annotator",  "")
+
+    # Auto-resume if the saved paths are still valid
+    has_valid_config = (
+        last_crops and last_output
+        and Path(last_crops).exists()
+        and sorted(Path(last_crops).glob("*.png"))
+    )
+
+    _, col, _ = st.columns([1, 1.6, 1])
+    with col:
+        _html(
+            '<div style="padding:32px 0 20px;text-align:center;">'
+            '<div style="font-size:0.68rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#9ca3af;margin-bottom:10px;">Bean Quality Annotator</div>'
+            '<div style="font-size:1.4rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Configure session</div>'
+            '<p style="font-size:0.85rem;color:#6b7280;margin:0;">Set your crop folder and output path to begin.</p>'
+            '</div>'
+        )
+
+        # ── Resume banner ──
+        if has_valid_config:
+            ann_dir  = Path(last_output) / "annotations"
+            done     = len(list(ann_dir.glob("*.json"))) if ann_dir.exists() else 0
+            total    = len(sorted(Path(last_crops).glob("*.png")))
+            _html(
+                f'<div style="padding:12px 16px;background:#f0fdf4;border:1px solid #bbf7d0;'
+                f'border-radius:8px;margin-bottom:16px;">'
+                f'<div style="font-size:0.72rem;font-weight:700;color:#16a34a;letter-spacing:0.04em;text-transform:uppercase;">Last session found</div>'
+                f'<div style="font-size:0.82rem;color:#166534;margin-top:4px;word-break:break-all;">{last_crops}</div>'
+                f'<div style="font-size:0.75rem;color:#4ade80;margin-top:2px;">{done} of {total} annotated so far</div>'
+                f'</div>'
+            )
+            if st.button("Resume last session", type="primary", use_container_width=True):
+                if _try_start(last_crops, last_output, last_name):
+                    st.rerun()
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            with st.expander("Start a different session"):
+                crops  = st.text_input("Crops folder",  value=last_crops,  key="new_crops")
+                output = st.text_input("Output folder", value=last_output, key="new_output")
+                name   = st.text_input("Annotator name", value=last_name,  key="new_name")
+                if st.button("Start", use_container_width=True):
+                    if _try_start(crops, output, name):
+                        st.rerun()
+        else:
+            # No saved config — plain setup form
+            crops  = st.text_input("Crops folder",  placeholder="/path/to/png_crops",
+                                   help="Folder containing PNG bean images")
+            output = st.text_input("Output folder", placeholder="/path/to/output",
+                                   help="Annotations, labeled images, and labels.csv are written here")
+            name   = st.text_input("Annotator name", placeholder="Optional — your name or initials")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Start annotating", type="primary", use_container_width=True):
+                if _try_start(crops, output, name):
+                    st.rerun()
+
+        st.divider()
+        _html('<div style="font-size:0.75rem;color:#9ca3af;text-align:center;line-height:1.6;">Severity 1–5 &nbsp;·&nbsp; Zoom viewer &nbsp;·&nbsp; Rectangle &amp; polygon drawing &nbsp;·&nbsp; JSON + CSV export</div>')
+
+
+# ── Main annotation view ──────────────────────────────────────────────────────
+
+def annotation_view() -> None:
+    crops_dir   = Path(st.session_state["crops_dir"])
+    output_dir  = Path(st.session_state["output_dir"])
+    ann_dir     = output_dir / "annotations"
+    labeled_dir = output_dir / "labeled"
+    csv_path    = output_dir / "labels.csv"
+
+    # Keep config file current so next launch can resume immediately
+    save_config(str(crops_dir), str(output_dir), st.session_state.get("annotator", ""))
+
+    files       = sorted(crops_dir.glob("*.png"))
+    total       = len(files)
+    annotations = load_all(ann_dir)
+    write_csv(csv_path, files, annotations)
+
+    idx_key = f"idx_{crops_dir}"
+    if idx_key not in st.session_state:
+        st.session_state[idx_key] = next_unfinished(files, annotations, 0)
+
+    cur = max(0, min(int(st.session_state[idx_key]), total - 1))
+    st.session_state[idx_key] = cur
+
+    file = files[cur]
+    mid  = mask_id_of(file)
+
+    panel = sidebar(files, annotations, csv_path, current_mid=mid)
+    ann     = load_annotation(ann_dir, mid)
+    img     = Image.open(file).convert("RGB")
+    sev     = ann.get("overall_severity")
+    skipped = ann.get("skip", {}).get("skipped")
+
+    completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
+    pct       = round(100 * completed / total) if total else 0
+
+    # ── Header ──
+    h_left, h_right = st.columns([3, 1])
+    with h_left:
+        _html(
+            f'<div style="margin-bottom:2px;">'
+            f'<span style="font-size:1.05rem;font-weight:700;color:#0f172a;">Bean {cur + 1} of {total}</span>'
+            f'<span style="font-size:0.75rem;color:#9ca3af;margin-left:10px;">{mid}</span>'
+            f'</div>'
+        )
+        annotator = st.session_state.get("annotator") or "—"
+        st.caption(f"Annotator: {annotator}  ·  {completed} of {total} done ({pct}%)")
+    with h_right:
+        if sev:
+            meta = SEVERITY[sev]
+            _html(
+                f'<div style="text-align:center;padding:8px 12px;border-radius:5px;background:{meta["color"]};color:{meta["fg"]};">'
+                f'<div style="font-size:0.58rem;font-weight:600;letter-spacing:0.08em;opacity:0.75;text-transform:uppercase;">saved</div>'
+                f'<div style="font-size:1.4rem;font-weight:800;line-height:1.1;">{sev}</div>'
+                f'<div style="font-size:0.62rem;font-weight:600;">{meta["label"]}</div>'
+                f'</div>'
+            )
+        elif skipped:
+            _html(
+                '<div style="text-align:center;padding:8px 12px;border-radius:5px;background:#f1f5f9;border:1px solid #e2e8f0;color:#64748b;">'
+                '<div style="font-size:0.58rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">skipped</div>'
+                '<div style="font-size:0.8rem;font-weight:600;margin-top:4px;">—</div>'
+                '</div>'
+            )
+
+    st.progress(completed / total if total else 0)
+
+    # ── Navigation ──
+    st.markdown("<br>", unsafe_allow_html=True)
+    n1, n2, n3, n4 = st.columns([1, 1.4, 1, 1.5])
+    if n1.button("Previous", use_container_width=True, disabled=cur == 0):
+        st.session_state[idx_key] = cur - 1
+        st.rerun()
+    with n2:
+        jump = st.number_input("Jump to", min_value=1, max_value=total,
+                               value=cur + 1, step=1, label_visibility="collapsed")
+        if st.button(f"Go to {int(jump)}", use_container_width=True):
+            st.session_state[idx_key] = int(jump) - 1
+            st.rerun()
+    if n3.button("Next", use_container_width=True, disabled=cur >= total - 1):
+        st.session_state[idx_key] = cur + 1
+        st.rerun()
+    if n4.button("Next unfinished", use_container_width=True):
+        st.session_state[idx_key] = next_unfinished(files, load_all(ann_dir), cur + 1)
+        st.rerun()
+
+    st.divider()
+
+    # ── Session state init ──
+    sev_key   = f"sev_{mid}"
+    notes_key = f"notes_{mid}"
+    if sev_key not in st.session_state:
+        st.session_state[sev_key]   = sev if sev in SEVERITY else 3
+    if notes_key not in st.session_state:
+        st.session_state[notes_key] = ann.get("overall_notes", "")
+
+    cur_sev   = int(st.session_state.get(sev_key, 3))
+    cur_notes = str(st.session_state.get(notes_key, ""))
+    defects   = ann.get("defects", []) or []
+
+    guide_panel(panel)
+    guidelines_panel()
+    st.divider()
+
+    # ── Active panel ──
+    if panel == "Inspect & Rate":
+        zoom_viewer(add_border(img, sev) if sev else img, key=mid)
+        st.divider()
+        st.caption("Overall severity")
+        cur_sev = severity_selector(cur_sev, key=sev_key)
+        st.caption("Notes")
+        cur_notes = st.text_area("Notes", placeholder="Optional observations about overall bean quality.",
+                                 key=notes_key, height=80, label_visibility="collapsed")
+
+    elif panel == "Draw Defects":
+        st.caption("Draw one shape per defect. Fill in type and severity in the form below the canvas.")
+        if hasattr(st, "segmented_control"):
+            mode = st.segmented_control("Mode", ["rect", "polygon"], default="rect", key=f"mode_{mid}")
+        else:
+            mode = st.radio("Mode", ["rect", "polygon"], horizontal=True, key=f"mode_{mid}")
+
+        objects, canvas_scale = draw_canvas(img, canvas_key=f"cv_{mid}", mode=mode, stroke=severity_color(cur_sev))
+
+        if objects:
+            shapes  = filter_shapes(objects, canvas_scale)
+            ignored = len(objects) - len(shapes)
+            n_s     = len(shapes)
+            st.caption(f"{n_s} shape{'s' if n_s != 1 else ''} detected{f' — {ignored} ignored (too small)' if ignored else ''}")
+            defects = defect_form(shapes, prefix=f"d_{mid}")
+        else:
+            defects = ann.get("defects", []) or []
+            st.caption("No shapes drawn. Existing defects will be preserved on save.")
+
+        saved = ann.get("defects", []) or []
+        with st.expander(f"Saved defects ({len(saved)})"):
+            existing_defects_table(ann)
+
+    else:
+        st.caption("Annotation record")
+        if ann.get("timestamp"):
+            st.caption(f"Last saved: {ann['timestamp']}")
+        st.json(ann)
+
+    # ── Actions bar (panel-aware) ──
+    st.divider()
+
+    def _do_save(advance_to_next: bool) -> None:
+        updated = {
+            "annotation_version": ANNOTATION_VER,
+            "mask_id":            mid,
+            "overall_severity":   int(cur_sev),
+            "overall_notes":      cur_notes.strip(),
+            "defects":            defects,
+            "skip":               {"skipped": False, "reason": ""},
+            "timestamp":          utc_now(),
+            "annotator":          st.session_state.get("annotator", ""),
+        }
+        save_annotation(ann_dir, updated)
+        write_csv(csv_path, files, load_all(ann_dir))
+        save_labeled_crop(img, mid, int(cur_sev), labeled_dir)
+        st.toast(f"Saved — {mid} · Severity {cur_sev} ({SEVERITY[int(cur_sev)]['label']})")
+        if advance_to_next:
+            st.session_state[idx_key] = min(cur + 1, total - 1)
+            st.session_state["_switch_to_panel"] = "Inspect & Rate"
+
+    # Skip expander — available on both steps
+    def _skip_widget() -> None:
+        with st.expander("Skip"):
+            skip_reason = st.text_input("Reason", key=f"skipreason_{mid}",
+                                        placeholder="Blurred, duplicate, unclear...",
+                                        label_visibility="collapsed")
+            st.caption("Skip when annotation is not reliable.")
+            if st.button("Confirm skip", use_container_width=True):
+                updated = blank_annotation(mid)
+                updated.update({
+                    "overall_notes": cur_notes.strip(),
+                    "defects":       ann.get("defects", []) or [],
+                    "skip":          {"skipped": True, "reason": skip_reason.strip() or "No reason given"},
+                    "timestamp":     utc_now(),
+                    "annotator":     st.session_state.get("annotator", ""),
+                })
+                save_annotation(ann_dir, updated)
+                write_csv(csv_path, files, load_all(ann_dir))
+                st.toast(f"Skipped — {mid}")
+                st.session_state[idx_key] = min(cur + 1, total - 1)
+                st.session_state["_switch_to_panel"] = "Inspect & Rate"
+                st.rerun()
+
+    if panel == "Inspect & Rate":
+        # Step 1: Save (stay on step 1) + Next Step + Skip
+        s_col, n_col, skip_col = st.columns([1.2, 1.2, 1])
+        with s_col:
+            if st.button("Save", type="primary", use_container_width=True):
+                _do_save(advance_to_next=False)
+                st.rerun()
+        with n_col:
+            if st.button("Next Step →", use_container_width=True):
+                _do_save(advance_to_next=False)
+                st.session_state["_switch_to_panel"] = "Draw Defects"
+                st.rerun()
+        with skip_col:
+            _skip_widget()
+
+    elif panel == "Draw Defects":
+        # Step 2: Previous Step + Save (advance to next bean) + Skip
+        p_col, s_col, skip_col = st.columns([1.2, 1.2, 1])
+        with p_col:
+            if st.button("← Previous Step", use_container_width=True):
+                st.session_state["_switch_to_panel"] = "Inspect & Rate"
+                st.rerun()
+        with s_col:
+            if st.button("Save", type="primary", use_container_width=True):
+                _do_save(advance_to_next=True)
+                st.rerun()
+        with skip_col:
+            _skip_widget()
+
+    else:
+        # Review JSON panel — just save + back
+        s_col, b_col = st.columns([1.2, 1])
+        with s_col:
+            if st.button("Save", type="primary", use_container_width=True):
+                _do_save(advance_to_next=True)
+                st.rerun()
+        with b_col:
+            if st.button("← Back to Step 1", use_container_width=True):
+                st.session_state["_switch_to_panel"] = "Inspect & Rate"
+                st.rerun()
+
+    if completed == total:
+        st.success("All beans annotated or skipped. Download labels.csv from the sidebar.")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Bean Quality Annotator",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.markdown(CSS, unsafe_allow_html=True)
+
+    if not st.session_state.get("ready"):
+        setup_page()
+    else:
+        annotation_view()
+
+
+if __name__ == "__main__":
+    main()
