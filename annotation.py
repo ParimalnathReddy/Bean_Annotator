@@ -14,6 +14,8 @@ import base64
 import csv
 import io
 import json
+import shutil
+import traceback
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -806,23 +808,33 @@ def setup_page() -> None:
             if uploaded_zip is not None:
                 try:
                     # Create temporary directory for crops
-                    temp_crops_dir = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "")
+                    temp_base = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "")
+                    temp_crops_dir = temp_base / "crops"
                     temp_crops_dir.mkdir(parents=True, exist_ok=True)
 
-                    # Extract ZIP
+                    # Extract ZIP to base temp directory first
                     with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
-                        zip_ref.extractall(temp_crops_dir)
+                        zip_ref.extractall(temp_base)
 
-                    # Find PNG files (handle nested folders)
-                    png_files = list(temp_crops_dir.rglob("*.png"))
+                    # Find PNG files recursively and move to crops directory
+                    png_files = []
+                    for root, dirs, filelist in __import__('os').walk(temp_base):
+                        for file in filelist:
+                            if file.lower().endswith('.png'):
+                                src = Path(root) / file
+                                # Don't move if already in crops dir
+                                if src.parent != temp_crops_dir:
+                                    shutil.copy2(src, temp_crops_dir / file)
+                                png_files.append(temp_crops_dir / file)
+
                     if not png_files:
-                        st.error("No PNG files found in ZIP")
+                        st.error("❌ No PNG files found in ZIP. Make sure your ZIP contains PNG images.")
                     else:
                         st.success(f"✓ Extracted {len(png_files)} PNG files")
                         annotator_name = st.text_input("Your name (optional)", key="zip_annotator_name")
                         if st.button("Start with uploaded crops", type="primary", use_container_width=True):
                             # Create output dir
-                            output_dir = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "") / "output"
+                            output_dir = temp_base / "output"
                             output_dir.mkdir(parents=True, exist_ok=True)
 
                             save_config(str(temp_crops_dir), str(output_dir), annotator_name.strip())
@@ -834,7 +846,8 @@ def setup_page() -> None:
                             })
                             st.rerun()
                 except Exception as e:
-                    st.error(f"Error processing ZIP: {e}")
+                    st.error(f"❌ Error processing ZIP: {str(e)}")
+                    st.write(traceback.format_exc())
 
         # ── Resume banner ──
         if has_valid_config:
@@ -892,6 +905,16 @@ def annotation_view() -> None:
 
     files       = sorted(crops_dir.glob("*.png"))
     total       = len(files)
+
+    # Safety check
+    if total == 0:
+        st.error(f"❌ No PNG files found in {crops_dir}")
+        st.info("Go back and upload a ZIP with PNG images")
+        if st.button("← Back to setup"):
+            st.session_state["ready"] = False
+            st.rerun()
+        return
+
     annotations = load_all(ann_dir)
     write_csv(csv_path, files, annotations)
 
