@@ -14,9 +14,6 @@ import base64
 import csv
 import io
 import json
-import shutil
-import traceback
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -795,59 +792,49 @@ def setup_page() -> None:
         _html(
             '<div style="padding:32px 0 20px;text-align:center;">'
             '<div style="font-size:0.68rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#9ca3af;margin-bottom:10px;">Bean Quality Annotator</div>'
-            '<div style="font-size:1.4rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Configure session</div>'
-            '<p style="font-size:0.85rem;color:#6b7280;margin:0;">Upload crops or set local paths to begin.</p>'
+            '<div style="font-size:1.4rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Upload bean images</div>'
+            '<p style="font-size:0.85rem;color:#6b7280;margin:0;">Select PNG files from your crops folder to annotate.</p>'
             '</div>'
         )
 
-        # ── ZIP Upload Option ──
+        # ── Image Upload ──
         st.markdown("<br>", unsafe_allow_html=True)
-        with st.expander("📦 Upload crops as ZIP (Recommended for cloud)", expanded=False):
-            st.caption("Upload a ZIP file containing your PNG crop images. Files will be extracted and ready to annotate.")
-            uploaded_zip = st.file_uploader("Choose ZIP file", type="zip", key="crops_zip_upload")
-            if uploaded_zip is not None:
-                try:
-                    # Create temporary directory for crops
-                    temp_base = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "")
-                    temp_crops_dir = temp_base / "crops"
-                    temp_crops_dir.mkdir(parents=True, exist_ok=True)
+        uploaded_files = st.file_uploader(
+            "Choose PNG images",
+            type="png",
+            accept_multiple_files=True,
+            key="crops_upload"
+        )
 
-                    # Extract ZIP to base temp directory first
-                    with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
-                        zip_ref.extractall(temp_base)
+        if uploaded_files and len(uploaded_files) > 0:
+            # Create temporary directory for crops
+            temp_base = Path.home() / ".bean_annotator_temp"
+            temp_crops_dir = temp_base / f"session_{datetime.now().timestamp()}"
+            temp_crops_dir.mkdir(parents=True, exist_ok=True)
 
-                    # Find PNG files recursively and move to crops directory
-                    png_files = []
-                    for root, dirs, filelist in __import__('os').walk(temp_base):
-                        for file in filelist:
-                            if file.lower().endswith('.png'):
-                                src = Path(root) / file
-                                # Don't move if already in crops dir
-                                if src.parent != temp_crops_dir:
-                                    shutil.copy2(src, temp_crops_dir / file)
-                                png_files.append(temp_crops_dir / file)
+            # Save uploaded images
+            for uploaded_file in uploaded_files:
+                save_path = temp_crops_dir / uploaded_file.name
+                save_path.write_bytes(uploaded_file.getbuffer())
 
-                    if not png_files:
-                        st.error("❌ No PNG files found in ZIP. Make sure your ZIP contains PNG images.")
-                    else:
-                        st.success(f"✓ Extracted {len(png_files)} PNG files")
-                        annotator_name = st.text_input("Your name (optional)", key="zip_annotator_name")
-                        if st.button("Start with uploaded crops", type="primary", use_container_width=True):
-                            # Create output dir
-                            output_dir = temp_base / "output"
-                            output_dir.mkdir(parents=True, exist_ok=True)
+            st.success(f"✓ Loaded {len(uploaded_files)} PNG images")
+            annotator_name = st.text_input("Your name (optional)", key="upload_annotator_name")
 
-                            save_config(str(temp_crops_dir), str(output_dir), annotator_name.strip())
-                            st.session_state.update({
-                                "crops_dir": str(temp_crops_dir),
-                                "output_dir": str(output_dir),
-                                "annotator": annotator_name.strip(),
-                                "ready": True
-                            })
-                            st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Error processing ZIP: {str(e)}")
-                    st.write(traceback.format_exc())
+            if st.button("Start annotating", type="primary", use_container_width=True):
+                # Create output dir
+                output_dir = temp_base / f"output_{datetime.now().timestamp()}"
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                save_config(str(temp_crops_dir), str(output_dir), annotator_name.strip())
+                st.session_state.update({
+                    "crops_dir": str(temp_crops_dir),
+                    "output_dir": str(output_dir),
+                    "annotator": annotator_name.strip(),
+                    "ready": True
+                })
+                st.rerun()
+        elif uploaded_files is not None and len(uploaded_files) == 0:
+            st.warning("Please select at least one PNG image")
 
         # ── Resume banner ──
         if has_valid_config:
