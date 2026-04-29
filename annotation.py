@@ -43,8 +43,10 @@ except Exception:
     pass
 
 try:
+    import streamlit_drawable_canvas as drawable_canvas
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
+    drawable_canvas = None
     st_canvas = None
 
 
@@ -327,7 +329,7 @@ def zoom_viewer(img: Image.Image, key: str) -> None:
 # ── Drawing canvas ────────────────────────────────────────────────────────────
 
 def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tuple[list[dict], float]:
-    if st_canvas is None:
+    if drawable_canvas is None or st_canvas is None:
         st.error("Install streamlit-drawable-canvas to use defect drawing.")
         st.code("pip install streamlit-drawable-canvas")
         return [], 1.0
@@ -338,15 +340,28 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
     ch     = max(1, int(h0 * scale))
     bg     = img.resize((cw, ch), RESAMPLE)
 
-    # streamlit-drawable-canvas 0.9.3 still calls Streamlit's old image_to_url API.
-    # The module-level compatibility shim restores that API for newer Streamlit.
+    bg_url = img_data_url(bg)
+
+    # Bypass streamlit-drawable-canvas' Python wrapper for the background image.
+    # Its wrapper uses Streamlit's internal media URL API, which can resolve to a
+    # blank background on Streamlit Cloud. The frontend accepts a data URL directly.
     try:
-        result = st_canvas(
-            fill_color="rgba(255,255,255,0.08)",
-            stroke_width=2, stroke_color=stroke,
-            background_image=bg, update_streamlit=True,
-            height=ch, width=cw, drawing_mode=mode,
-            point_display_radius=3, key=canvas_key,
+        initial_drawing = {"version": "4.4.0", "background": ""}
+        component_value = drawable_canvas._component_func(
+            fillColor="rgba(255,255,255,0.08)",
+            strokeWidth=2,
+            strokeColor=stroke,
+            backgroundColor="",
+            backgroundImageURL=bg_url,
+            realtimeUpdateStreamlit=(mode != "polygon"),
+            canvasHeight=ch,
+            canvasWidth=cw,
+            drawingMode=mode,
+            initialDrawing=initial_drawing,
+            displayToolbar=True,
+            displayRadius=3,
+            key=canvas_key,
+            default=None,
         )
     except Exception as e:
         st.image(bg, caption="Image preview — drawing unavailable")
@@ -358,8 +373,8 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
         return [], scale
 
     objects = []
-    if result and result.json_data:
-        objects = result.json_data.get("objects", []) or []
+    if component_value and component_value.get("raw"):
+        objects = component_value["raw"].get("objects", []) or []
     return objects, scale
 
 
