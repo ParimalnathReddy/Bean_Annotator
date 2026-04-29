@@ -27,18 +27,6 @@ try:
 except ImportError:
     st_canvas = None
 
-try:
-    import streamlit.elements.image as st_image
-    from streamlit.elements.lib.image_utils import image_to_url as _image_to_url
-    from streamlit.elements.lib.layout_utils import LayoutConfig
-
-    if not hasattr(st_image, "image_to_url"):
-        def image_to_url_compat(image, width, clamp, channels, output_format, image_id):
-            return _image_to_url(image, LayoutConfig(width=width), clamp, channels, output_format, image_id)
-        st_image.image_to_url = image_to_url_compat
-except Exception:
-    pass
-
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -330,10 +318,14 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
     ch     = max(1, int(h0 * scale))
     bg     = img.resize((cw, ch), RESAMPLE)
 
+    # Use background_url (data URL) instead of background_image to avoid
+    # Streamlit's internal image_to_url API which breaks on newer Streamlit versions.
+    bg_url = img_data_url(bg)
+
     result = st_canvas(
         fill_color="rgba(255,255,255,0.08)",
         stroke_width=2, stroke_color=stroke,
-        background_image=bg, update_streamlit=True,
+        background_url=bg_url, update_streamlit=True,
         height=ch, width=cw, drawing_mode=mode,
         point_display_radius=3, key=canvas_key,
     )
