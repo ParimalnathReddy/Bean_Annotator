@@ -14,7 +14,6 @@ import base64
 import csv
 import io
 import json
-import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -245,46 +244,6 @@ def save_annotation(ann_dir: Path, ann: dict[str, Any]) -> None:
     ann["timestamp"] = utc_now()
     with ann_path(ann_dir, ann["mask_id"]).open("w", encoding="utf-8") as f:
         json.dump(ann, f, indent=2)
-
-
-# ── Cloud-mode helpers (no filesystem, everything in session state) ──────────
-
-def is_cloud() -> bool:
-    return st.session_state.get("mode") == "cloud"
-
-
-def cloud_all_anns() -> dict[str, dict[str, Any]]:
-    return st.session_state.get("cloud_anns", {})
-
-
-def cloud_get_ann(mask_id: str) -> dict[str, Any]:
-    return cloud_all_anns().get(mask_id, blank_annotation(mask_id))
-
-
-def cloud_save_ann(ann: dict[str, Any]) -> None:
-    ann["timestamp"] = utc_now()
-    if "cloud_anns" not in st.session_state:
-        st.session_state["cloud_anns"] = {}
-    st.session_state["cloud_anns"][ann["mask_id"]] = ann
-
-
-def cloud_open_img(mask_id: str) -> Image.Image:
-    raw = st.session_state["cloud_imgs"][mask_id]
-    return Image.open(io.BytesIO(raw)).convert("RGB")
-
-
-def cloud_anns_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for mid, ann in cloud_all_anns().items():
-            zf.writestr(f"{mid}.json", json.dumps(ann, indent=2))
-    return buf.getvalue()
-
-
-def cloud_csv_bytes() -> bytes:
-    order = st.session_state.get("cloud_img_order", [])
-    files = [Path(f"{m}.png") for m in order]
-    return csv_bytes(files, cloud_all_anns())
 
 
 def add_border(img: Image.Image, sev: int | None, width: int = BORDER_WIDTH) -> Image.Image:
@@ -651,7 +610,7 @@ def defect_form(shapes: list[dict], prefix: str) -> list[dict[str, Any]]:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
-def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path: Path | None, current_mid: str = "", cloud: bool = False) -> str:
+def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path: Path, current_mid: str = "") -> str:
     total     = len(files)
     completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
     skipped   = sum(1 for a in annotations.values() if a.get("skip", {}).get("skipped"))
@@ -777,18 +736,9 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
         _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
 
         # ── Footer actions ──
-        if cloud:
-            st.download_button("Download annotations (ZIP)", data=cloud_anns_zip(),
-                               file_name="annotations.zip", mime="application/zip",
-                               use_container_width=True)
-            st.download_button("Download labels.csv", data=cloud_csv_bytes(),
-                               file_name="labels.csv", mime="text/csv",
-                               use_container_width=True)
-            st.caption("Download regularly — annotations are lost if the page is refreshed.")
-        else:
-            st.download_button("Download labels.csv", data=csv_bytes(files, annotations),
-                               file_name="labels.csv", mime="text/csv", use_container_width=True)
-            st.caption(f"Auto-saved to {csv_path.name} after each save.")
+        st.download_button("Download labels.csv", data=csv_bytes(files, annotations),
+                           file_name="labels.csv", mime="text/csv", use_container_width=True)
+        st.caption(f"Auto-saved to {csv_path.name} after each save.")
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Change folder", use_container_width=True):
             st.session_state["ready"] = False
@@ -814,7 +764,7 @@ def _try_start(crops: str, output: str, name: str) -> bool:
         st.error(f"No PNG files found in {crops_dir}.")
         return False
     save_config(str(crops_dir), str(out_dir), name.strip())
-    st.session_state.update({"crops_dir": str(crops_dir), "output_dir": str(out_dir),
+    st.session_state.update({"mode": "local", "crops_dir": str(crops_dir), "output_dir": str(out_dir),
                               "annotator": name.strip(), "ready": True})
     return True
 
@@ -840,128 +790,60 @@ def setup_page() -> None:
             '</div>'
         )
 
-        tab_upload, tab_local = st.tabs(["Upload images", "Local folder"])
-
-        # ── Tab 1: upload (works on Streamlit Cloud and locally) ──
-        with tab_upload:
-            st.caption("Select all PNG bean images you want to annotate. "
-                       "Optionally upload previously exported annotation JSONs to resume.")
-
-            img_files = st.file_uploader(
-                "Bean images (PNG)",
-                type=["png", "jpg", "jpeg"],
-                accept_multiple_files=True,
-                key="su_imgs",
+        if has_local:
+            ann_dir = Path(last_output) / "annotations"
+            done    = len(list(ann_dir.glob("*.json"))) if ann_dir.exists() else 0
+            total   = len(sorted(Path(last_crops).glob("*.png")))
+            _html(
+                f'<div style="padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;'
+                f'border-radius:7px;margin-bottom:16px;">'
+                f'<div style="font-size:0.68rem;font-weight:700;color:#16a34a;letter-spacing:0.06em;text-transform:uppercase;">Last session</div>'
+                f'<div style="font-size:0.8rem;color:#166534;margin-top:3px;word-break:break-all;">{last_crops}</div>'
+                f'<div style="font-size:0.72rem;color:#15803d;margin-top:2px;">{done} of {total} annotated</div>'
+                f'</div>'
             )
-            ann_files = st.file_uploader(
-                "Previous annotations (JSON) — optional",
-                type="json",
-                accept_multiple_files=True,
-                key="su_anns",
-            )
-            name_up = st.text_input("Annotator name", placeholder="Optional", key="su_name")
-
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Start annotating", type="primary",
-                         use_container_width=True, key="su_start"):
-                if not img_files:
-                    st.error("Select at least one image.")
-                else:
-                    imgs: dict[str, bytes] = {}
-                    for f in img_files:
-                        mid = Path(f.name).stem
-                        imgs[mid] = f.getvalue()
-
-                    prior_anns: dict[str, dict] = {}
-                    for f in (ann_files or []):
-                        try:
-                            data = json.loads(f.getvalue())
-                            mid  = str(data.get("mask_id") or Path(f.name).stem)
-                            prior_anns[mid] = data
-                        except Exception:
-                            pass
-
-                    st.session_state.update({
-                        "mode":           "cloud",
-                        "cloud_imgs":     imgs,
-                        "cloud_img_order": sorted(imgs.keys()),
-                        "cloud_anns":     prior_anns,
-                        "annotator":      name_up.strip(),
-                        "ready":          True,
-                    })
+            if st.button("Resume last session", type="primary", use_container_width=True):
+                if _try_start(last_crops, last_output, last_name):
                     st.rerun()
-
-        # ── Tab 2: local folder (original behaviour) ──
-        with tab_local:
-            if has_local:
-                ann_dir = Path(last_output) / "annotations"
-                done    = len(list(ann_dir.glob("*.json"))) if ann_dir.exists() else 0
-                total   = len(sorted(Path(last_crops).glob("*.png")))
-                _html(
-                    f'<div style="padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;'
-                    f'border-radius:7px;margin-bottom:14px;">'
-                    f'<div style="font-size:0.68rem;font-weight:700;color:#16a34a;letter-spacing:0.06em;text-transform:uppercase;">Last session</div>'
-                    f'<div style="font-size:0.8rem;color:#166534;margin-top:3px;word-break:break-all;">{last_crops}</div>'
-                    f'<div style="font-size:0.72rem;color:#4ade80;margin-top:2px;">{done} of {total} annotated</div>'
-                    f'</div>'
-                )
-                if st.button("Resume", type="primary", use_container_width=True, key="sl_resume"):
-                    if _try_start(last_crops, last_output, last_name):
-                        st.rerun()
-                st.markdown("<br>", unsafe_allow_html=True)
-
-            crops  = st.text_input("Crops folder",  value=last_crops,
-                                   placeholder="/path/to/png_crops", key="sl_crops")
-            output = st.text_input("Output folder", value=last_output,
-                                   placeholder="/path/to/output",    key="sl_output")
-            name   = st.text_input("Annotator name", value=last_name,
-                                   placeholder="Optional",           key="sl_name")
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Start", use_container_width=True, key="sl_start"):
-                if _try_start(crops, output, name):
-                    st.rerun()
+
+        crops  = st.text_input("Crops folder",  value=last_crops,  placeholder="/path/to/png_crops")
+        output = st.text_input("Output folder", value=last_output, placeholder="/path/to/output")
+        name   = st.text_input("Annotator name", value=last_name,  placeholder="Optional")
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("Start annotating", type="primary", use_container_width=True):
+            if _try_start(crops, output, name):
+                st.rerun()
 
         st.divider()
         _html('<div style="font-size:0.74rem;color:#9ca3af;text-align:center;line-height:1.7;">'
-              'Severity 1–5 &nbsp;·&nbsp; Zoom viewer &nbsp;·&nbsp; Rectangle &amp; polygon drawing'
-              ' &nbsp;·&nbsp; JSON + CSV export</div>')
+              'Annotations saved as JSON to your output folder &nbsp;·&nbsp; Share the annotations/ folder offline'
+              '</div>')
 
 
 # ── Main annotation view ──────────────────────────────────────────────────────
 
 def annotation_view() -> None:
-    _cloud = is_cloud()
+    crops_dir   = Path(st.session_state["crops_dir"])
+    output_dir  = Path(st.session_state["output_dir"])
+    ann_dir     = output_dir / "annotations"
+    labeled_dir = output_dir / "labeled"
+    csv_path    = output_dir / "labels.csv"
 
-    if _cloud:
-        # ── Cloud mode: everything lives in session state ──
-        img_order   = st.session_state.get("cloud_img_order", [])
-        total       = len(img_order)
-        files       = [Path(f"{m}.png") for m in img_order]   # synthetic Path list
-        annotations = cloud_all_anns()
-        ann_dir     = None
-        labeled_dir = None
-        csv_path    = None
-    else:
-        # ── Local mode: read from disk ──
-        crops_dir   = Path(st.session_state["crops_dir"])
-        output_dir  = Path(st.session_state["output_dir"])
-        ann_dir     = output_dir / "annotations"
-        labeled_dir = output_dir / "labeled"
-        csv_path    = output_dir / "labels.csv"
-        save_config(str(crops_dir), str(output_dir), st.session_state.get("annotator", ""))
-        files       = sorted(crops_dir.glob("*.png"))
-        total       = len(files)
-        annotations = load_all(ann_dir)
-        write_csv(csv_path, files, annotations)
+    save_config(str(crops_dir), str(output_dir), st.session_state.get("annotator", ""))
+    files       = sorted(crops_dir.glob("*.png"))
+    total       = len(files)
+    annotations = load_all(ann_dir)
+    write_csv(csv_path, files, annotations)
 
     if total == 0:
-        st.error("No images found. Go back and upload PNG files.")
+        st.error(f"No PNG files found in {crops_dir}.")
         if st.button("Back to setup"):
             st.session_state["ready"] = False
             st.rerun()
         return
 
-    idx_key = "cloud_idx" if _cloud else f"idx_{st.session_state.get('crops_dir','')}"
+    idx_key = f"idx_{crops_dir}"
     if idx_key not in st.session_state:
         st.session_state[idx_key] = next_unfinished(files, annotations, 0)
 
@@ -971,12 +853,11 @@ def annotation_view() -> None:
     file = files[cur]
     mid  = mask_id_of(file)
 
-    panel = sidebar(files, annotations, csv_path, current_mid=mid, cloud=_cloud)
-
-    ann = cloud_get_ann(mid) if _cloud else load_annotation(ann_dir, mid)
+    panel = sidebar(files, annotations, csv_path, current_mid=mid)
+    ann   = load_annotation(ann_dir, mid)
 
     try:
-        img = cloud_open_img(mid) if _cloud else Image.open(file).convert("RGB")
+        img = Image.open(file).convert("RGB")
     except Exception as e:
         st.error(f"Cannot open image '{mid}': {e}")
         st.session_state[idx_key] = min(cur + 1, total - 1)
@@ -1110,12 +991,9 @@ def annotation_view() -> None:
             "timestamp":          utc_now(),
             "annotator":          st.session_state.get("annotator", ""),
         }
-        if _cloud:
-            cloud_save_ann(updated)
-        else:
-            save_annotation(ann_dir, updated)
-            write_csv(csv_path, files, load_all(ann_dir))
-            save_labeled_crop(img, mid, int(cur_sev), labeled_dir)
+        save_annotation(ann_dir, updated)
+        write_csv(csv_path, files, load_all(ann_dir))
+        save_labeled_crop(img, mid, int(cur_sev), labeled_dir)
         st.toast(f"Saved — {mid} · Severity {cur_sev} ({SEVERITY[int(cur_sev)]['label']})")
         if advance_to_next:
             st.session_state[idx_key] = min(cur + 1, total - 1)
@@ -1136,11 +1014,8 @@ def annotation_view() -> None:
                     "timestamp":     utc_now(),
                     "annotator":     st.session_state.get("annotator", ""),
                 })
-                if _cloud:
-                    cloud_save_ann(updated)
-                else:
-                    save_annotation(ann_dir, updated)
-                    write_csv(csv_path, files, load_all(ann_dir))
+                save_annotation(ann_dir, updated)
+                write_csv(csv_path, files, load_all(ann_dir))
                 st.toast(f"Skipped — {mid}")
                 st.session_state[idx_key] = min(cur + 1, total - 1)
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
