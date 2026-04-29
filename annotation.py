@@ -318,19 +318,40 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
     ch     = max(1, int(h0 * scale))
     bg     = img.resize((cw, ch), RESAMPLE)
 
-    # Use background_url (data URL) instead of background_image to avoid
-    # Streamlit's internal image_to_url API which breaks on newer Streamlit versions.
     bg_url = img_data_url(bg)
 
-    result = st_canvas(
-        fill_color="rgba(255,255,255,0.08)",
-        stroke_width=2, stroke_color=stroke,
-        background_url=bg_url, update_streamlit=True,
-        height=ch, width=cw, drawing_mode=mode,
-        point_display_radius=3, key=canvas_key,
-    )
+    # Try background_url first (avoids Streamlit internal API issues).
+    # If the installed canvas version doesn't support it, fall back to background_image.
+    # If that also fails, show the image as a static preview and return empty.
+    result = None
+    try:
+        result = st_canvas(
+            fill_color="rgba(255,255,255,0.08)",
+            stroke_width=2, stroke_color=stroke,
+            background_url=bg_url, update_streamlit=True,
+            height=ch, width=cw, drawing_mode=mode,
+            point_display_radius=3, key=canvas_key,
+        )
+    except TypeError:
+        try:
+            result = st_canvas(
+                fill_color="rgba(255,255,255,0.08)",
+                stroke_width=2, stroke_color=stroke,
+                background_image=bg, update_streamlit=True,
+                height=ch, width=cw, drawing_mode=mode,
+                point_display_radius=3, key=canvas_key,
+            )
+        except Exception as e:
+            st.image(bg, caption="Image preview — drawing unavailable")
+            st.warning(
+                f"The drawing canvas failed to load ({type(e).__name__}). "
+                "You can still rate the bean in Step 1. "
+                "Please report this error to the developer: **parimalnath321@gmail.com**"
+            )
+            return [], scale
+
     objects = []
-    if result.json_data:
+    if result and result.json_data:
         objects = result.json_data.get("objects", []) or []
     return objects, scale
 
@@ -941,6 +962,18 @@ def annotation_view() -> None:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _report_error(e: Exception) -> None:
+    st.error("Something went wrong. The page may recover on reload.")
+    with st.expander("Error details — include this when reporting"):
+        st.code(f"{type(e).__name__}: {e}", language="text")
+    st.info(
+        "Please report this error to **parimalnath321@gmail.com** "
+        "or open an issue on GitHub. Include the error details above.",
+    )
+    if st.button("Reload"):
+        st.rerun()
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Bean Quality Annotator",
@@ -949,10 +982,13 @@ def main() -> None:
     )
     st.markdown(CSS, unsafe_allow_html=True)
 
-    if not st.session_state.get("ready"):
-        setup_page()
-    else:
-        annotation_view()
+    try:
+        if not st.session_state.get("ready"):
+            setup_page()
+        else:
+            annotation_view()
+    except Exception as e:
+        _report_error(e)
 
 
 if __name__ == "__main__":
