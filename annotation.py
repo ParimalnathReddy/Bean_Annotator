@@ -223,18 +223,97 @@ def open_img(mask_id: str) -> Image.Image:
     return Image.open(io.BytesIO(st.session_state["imgs"][mask_id])).convert("RGB")
 
 
-def anns_zip() -> bytes:
+def project_bundle_bytes() -> bytes:
+    """One resumable export with images, detailed JSON annotations, and labels.csv."""
+    order = st.session_state.get("img_order", [])
+    annotations = all_anns()
+    images = st.session_state.get("imgs", {})
+    files = [Path(f"{m}.png") for m in order]
+    manifest = {
+        "bundle_version": 1,
+        "created_at": utc_now(),
+        "annotation_version": ANNOTATION_VER,
+        "annotator": st.session_state.get("annotator", ""),
+        "image_order": order,
+        "annotation_count": len(annotations),
+    }
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for mid, ann in all_anns().items():
-            zf.writestr(f"{mid}.json", json.dumps(ann, indent=2))
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        zf.writestr("labels.csv", csv_bytes(files, annotations))
+        for mid in order:
+            if mid in images:
+                zf.writestr(f"images/{mid}.png", image_png_bytes(images[mid]))
+            ann = annotations.get(mid, blank_annotation(mid))
+            zf.writestr(f"annotations/{mid}.json", json.dumps(ann, indent=2))
     return buf.getvalue()
 
 
-def anns_csv() -> bytes:
-    order = st.session_state.get("img_order", [])
-    files = [Path(f"{m}.png") for m in order]
-    return csv_bytes(files, all_anns())
+def image_png_bytes(raw: bytes) -> bytes:
+    """Normalize uploaded image bytes to PNG for the resumable bundle."""
+    out = io.BytesIO()
+    Image.open(io.BytesIO(raw)).convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+
+
+def load_resume_uploads(uploaded_files: list[Any]) -> tuple[dict[str, bytes], dict[str, dict], list[str], list[str]]:
+    """Load new ZIP bundles, old annotation ZIPs, or old individual JSON files."""
+    bundled_imgs: dict[str, bytes] = {}
+    prior: dict[str, dict] = {}
+    skipped: list[str] = []
+    unmatched: list[str] = []
+
+    def add_ann(data: Any, source_name: str, valid_mask_ids: set[str] | None) -> None:
+        if not isinstance(data, dict):
+            raise ValueError("annotation JSON must be an object")
+        mid = str(data.get("mask_id") or Path(source_name).stem)
+        if valid_mask_ids is not None and mid not in valid_mask_ids:
+            unmatched.append(source_name)
+            return
+        prior[mid] = data
+
+    for f in uploaded_files or []:
+        name = f.name
+        raw = f.getvalue()
+        suffix = Path(name).suffix.lower()
+        try:
+            if suffix == ".zip":
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    for img_name in zf.namelist():
+                        if img_name.endswith("/") or not img_name.startswith("images/"):
+                            continue
+                        if Path(img_name).suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                            continue
+                        mid = Path(img_name).stem
+                        try:
+                            bundled_imgs[mid] = image_png_bytes(zf.read(img_name))
+                        except Exception:
+                            skipped.append(f"{name}:{img_name}")
+
+                    valid_ids = set(bundled_imgs) if bundled_imgs else None
+                    json_names = [
+                        n for n in zf.namelist()
+                        if n.lower().endswith(".json")
+                        and Path(n).name != "manifest.json"
+                        and not n.endswith("/")
+                    ]
+                    if not json_names:
+                        skipped.append(name)
+                        continue
+                    for json_name in json_names:
+                        try:
+                            data = json.loads(zf.read(json_name).decode("utf-8"))
+                            add_ann(data, json_name, valid_ids)
+                        except Exception:
+                            skipped.append(f"{name}:{json_name}")
+            else:
+                data = json.loads(raw)
+                add_ann(data, name, None)
+        except Exception:
+            skipped.append(name)
+
+    return bundled_imgs, prior, skipped, unmatched
 
 
 # ── Core data helpers ─────────────────────────────────────────────────────────
@@ -697,11 +776,8 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
 
         # ── Downloads ──
         _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Export</div>')
-        st.download_button("Download annotations (ZIP)", data=anns_zip(),
-                           file_name="annotations.zip", mime="application/zip",
-                           use_container_width=True)
-        st.download_button("Download labels.csv", data=anns_csv(),
-                           file_name="labels.csv", mime="text/csv",
+        st.download_button("Download project bundle", data=project_bundle_bytes(),
+                           file_name="bean_annotations_bundle.zip", mime="application/zip",
                            use_container_width=True)
         st.caption("Download regularly — annotations are not saved after refresh.")
 
@@ -736,22 +812,18 @@ def setup_page() -> None:
             help="Select all images you want to annotate in this session.",
         )
         ann_files = st.file_uploader(
-            "Resume — upload previous annotation JSONs (optional)",
-            type=["json"],
+            "Resume — upload previous project bundle or JSONs (optional)",
+            type=["zip", "json"],
             accept_multiple_files=True,
-            help="Upload .json files from a previous session to continue where you left off.",
+            help="Upload bean_annotations_bundle.zip, or older individual .json files, to continue where you left off.",
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         if st.button("Start annotating", type="primary", use_container_width=True):
-            if not img_files:
-                st.error("Select at least one image file to continue.")
-                return
-
             imgs: dict[str, bytes] = {}
             skipped_images: list[str] = []
-            for f in img_files:
+            for f in (img_files or []):
                 mid = Path(f.name).stem
                 raw = f.getvalue()
                 try:
@@ -761,32 +833,24 @@ def setup_page() -> None:
                 except Exception:
                     skipped_images.append(f.name)
 
-            if not imgs:
-                st.error("No valid images found in the selection.")
-                return
             if skipped_images:
                 st.warning("Skipped invalid image file(s): " + ", ".join(skipped_images))
 
-            prior: dict[str, dict] = {}
-            skipped_json: list[str] = []
-            unmatched_json: list[str] = []
-            for f in (ann_files or []):
-                try:
-                    data = json.loads(f.getvalue())
-                    if not isinstance(data, dict):
-                        raise ValueError("annotation JSON must be an object")
-                    mid  = str(data.get("mask_id") or Path(f.name).stem)
-                    if mid not in imgs:
-                        unmatched_json.append(f.name)
-                        continue
-                    prior[mid] = data
-                except Exception:
-                    skipped_json.append(f.name)
+            bundle_imgs, prior, skipped_json, unmatched_json = load_resume_uploads(ann_files or [])
+            for mid, raw in bundle_imgs.items():
+                imgs.setdefault(mid, raw)
 
             if skipped_json:
-                st.warning("Skipped invalid annotation JSON file(s): " + ", ".join(skipped_json))
+                st.warning("Skipped invalid resume file(s): " + ", ".join(skipped_json))
+            valid_ids = set(imgs.keys())
+            unmatched_json.extend(mid for mid in prior if mid not in valid_ids)
+            prior = {mid: ann for mid, ann in prior.items() if mid in valid_ids}
             if unmatched_json:
-                st.warning("Skipped annotation JSONs with no matching uploaded image: " + ", ".join(unmatched_json))
+                st.warning("Skipped annotations with no matching image: " + ", ".join(unmatched_json))
+
+            if not imgs:
+                st.error("Upload at least one image, or upload a project bundle that contains images.")
+                return
 
             st.session_state.update({
                 "imgs":      imgs,
@@ -800,7 +864,7 @@ def setup_page() -> None:
         st.divider()
         _html(
             '<div style="font-size:0.74rem;color:#9ca3af;text-align:center;line-height:1.7;">'
-            'Annotate &nbsp;·&nbsp; Download ZIP when done &nbsp;·&nbsp; Upload JSONs next session to resume'
+            'Annotate &nbsp;·&nbsp; Download one project bundle &nbsp;·&nbsp; Upload it next session to resume'
             '</div>'
         )
 
@@ -1031,7 +1095,7 @@ def annotation_view() -> None:
                 st.rerun()
 
     if completed == total:
-        st.success("All beans annotated or skipped. Download the ZIP from the sidebar.")
+        st.success("All beans annotated or skipped. Download the project bundle from the sidebar.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

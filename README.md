@@ -10,7 +10,7 @@ Streamlit app for annotating bean crop images with quality severity scores and d
 - Defect type labels and notes
 - Skip option for unclear beans
 - In-session annotation records
-- Downloadable `annotations.zip` and `labels.csv`
+- Single downloadable project bundle with images, detailed annotations, and `labels.csv`
 
 ## Local Run
 
@@ -19,7 +19,7 @@ python3 -m pip install -r requirements.txt
 python3 -m streamlit run annotate_beans.py --server.port 8501
 ```
 
-Upload bean images from the start screen. When finished, download `annotations.zip` and `labels.csv` from the sidebar.
+Upload bean images from the start screen. When finished, download `bean_annotations_bundle.zip` from the sidebar.
 
 ## Deploy On Streamlit Community Cloud
 
@@ -38,11 +38,10 @@ The dependency file is next to the entrypoint, so Streamlit Cloud will install t
 
 ## Important Deployment Note
 
-The deployed app uses browser uploads and Streamlit session state. It does not use a database or persistent server storage. Refreshing the page or restarting the app clears the active session, so download `annotations.zip` and `labels.csv` regularly.
+The deployed app uses browser uploads and Streamlit session state. It does not use a database or persistent server storage. Refreshing the page or restarting the app clears the active session, so download `bean_annotations_bundle.zip` regularly.
 
-To resume later, upload the same images plus the exported JSON annotation files from `annotations.zip`.
+To resume later, upload `bean_annotations_bundle.zip`. The bundle includes the images and the annotation details needed to continue.
 
 ## Outputs
 
-- `annotations.zip`: one JSON file per annotated bean
-- `labels.csv`: summary table with severity, skip status, defect count, notes, timestamp, and annotator
+- `bean_annotations_bundle.zip`: one ZIP containing `manifest.json`, `labels.csv`, `images/*.png`, and `annotations/*.json`
