@@ -1,10 +1,9 @@
 """
-annotation.py — Bean Quality Annotator
+annotation.py — Bean Quality Annotator (deployment build)
 
-Run:
-    streamlit run annotate_beans.py --server.port 8501
+Deployed on Streamlit Cloud. Users upload PNG images, annotate them,
+and download a ZIP of all JSON annotation files when done.
 
-Requires:
     pip install streamlit pillow streamlit-drawable-canvas
 """
 
@@ -41,30 +40,14 @@ except Exception:
     pass
 
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+
 BORDER_WIDTH     = 8
 MAX_CANVAS_WIDTH = 760
 MIN_CANVAS_WIDTH = 620
 MIN_DEFECT_AREA  = 25
 ANNOTATION_VER   = 3
 RESAMPLE         = getattr(Image, "Resampling", Image).LANCZOS
-
-CONFIG_FILE = Path.home() / ".bean_annotator.json"
-
-
-def load_config() -> dict:
-    try:
-        with CONFIG_FILE.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_config(crops_dir: str, output_dir: str, annotator: str) -> None:
-    try:
-        with CONFIG_FILE.open("w", encoding="utf-8") as f:
-            json.dump({"crops_dir": crops_dir, "output_dir": output_dir, "annotator": annotator}, f)
-    except OSError:
-        pass
 
 DEFECT_TYPES = [
     "Crack", "Hole", "Discoloration", "Mold", "Spot",
@@ -85,11 +68,11 @@ SEVERITY = {
 }
 
 STEPS = [
-    ("Inspect",       "Open the zoom viewer. Scroll to zoom, drag to pan, double-click to reset."),
+    ("Inspect",       "Use the zoom viewer. Scroll to zoom, drag to pan, double-click to reset."),
     ("Rate",          "Assign the overall severity from 1 (Excellent) to 5 (Severe)."),
     ("Draw defects",  "Switch to Draw tab. Draw a rectangle or polygon around each defect."),
-    ("Label defects", "For each shape select the defect type, local severity, and add notes."),
-    ("Save",          "Click Save. A JSON file is written and labels.csv is updated."),
+    ("Label defects", "For each shape select the defect type, severity, and add notes."),
+    ("Save",          "Click Save. Download the annotations ZIP from the sidebar regularly."),
 ]
 
 PANEL_STEPS = {
@@ -98,7 +81,8 @@ PANEL_STEPS = {
     "Saved JSON":     {4},
 }
 
-# ── Stylesheet ────────────────────────────────────────────────────────────────
+
+# ── CSS ───────────────────────────────────────────────────────────────────────
 
 CSS = """
 <style>
@@ -133,7 +117,7 @@ div[data-testid="stToast"] { border-radius:6px !important; font-size:0.82rem !im
 div[data-testid="stDataFrame"] { border:1px solid #e5e7eb !important; border-radius:6px !important; overflow:hidden; }
 div[data-testid="stRadio"] > div { gap:8px !important; }
 div[data-testid="stRadio"] label { font-size:0.82rem !important; }
-/* ── Sidebar — light theme ── */
+/* ── Sidebar ── */
 section[data-testid="stSidebar"] { background:#f8fafc !important; border-right:1px solid #e2e8f0 !important; min-width:248px !important; }
 section[data-testid="stSidebar"] .stMarkdown p,
 section[data-testid="stSidebar"] .stMarkdown li,
@@ -154,10 +138,9 @@ section[data-testid="stSidebar"] .stButton button:hover { background:#f1f5f9 !im
 """
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── HTML helpers ──────────────────────────────────────────────────────────────
 
 def _html(content: str) -> None:
-    """Render a pre-built HTML string. Uses st.html if available, otherwise markdown."""
     if hasattr(st, "html"):
         st.html(content)
     else:
@@ -165,12 +148,51 @@ def _html(content: str) -> None:
 
 
 def _col_html(col: Any, content: str) -> None:
-    """Same as _html but into a column context."""
     if hasattr(col, "html"):
         col.html(content)
     else:
         col.markdown(content, unsafe_allow_html=True)
 
+
+# ── Session state ─────────────────────────────────────────────────────────────
+# imgs      : dict[mid, bytes]       — raw PNG bytes per image
+# img_order : list[str]              — sorted list of mask IDs
+# anns      : dict[mid, dict]        — annotation records
+# annotator : str
+# ready     : bool
+
+def all_anns() -> dict[str, dict[str, Any]]:
+    return st.session_state.get("anns", {})
+
+
+def get_ann(mask_id: str) -> dict[str, Any]:
+    return all_anns().get(mask_id, blank_annotation(mask_id))
+
+
+def save_ann(ann: dict[str, Any]) -> None:
+    ann["timestamp"] = utc_now()
+    st.session_state.setdefault("anns", {})[ann["mask_id"]] = ann
+
+
+def open_img(mask_id: str) -> Image.Image:
+    return Image.open(io.BytesIO(st.session_state["imgs"][mask_id])).convert("RGB")
+
+
+def anns_zip() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for mid, ann in all_anns().items():
+            zf.writestr(f"{mid}.json", json.dumps(ann, indent=2))
+    return buf.getvalue()
+
+
+def anns_csv() -> bytes:
+    order = st.session_state.get("img_order", [])
+    files = [Path(f"{m}.png") for m in order]
+    return csv_bytes(files, all_anns())
+
+
+# ── Core data helpers ─────────────────────────────────────────────────────────
 
 def severity_color(sev: int | None) -> str:
     return SEVERITY.get(sev, {}).get("color", "#64748b")
@@ -189,10 +211,6 @@ def mask_id_of(path: Path) -> str:
     return path.stem
 
 
-def ann_path(ann_dir: Path, mask_id: str) -> Path:
-    return ann_dir / f"{mask_id}.json"
-
-
 def blank_annotation(mask_id: str) -> dict[str, Any]:
     return {
         "annotation_version": ANNOTATION_VER,
@@ -206,98 +224,19 @@ def blank_annotation(mask_id: str) -> dict[str, Any]:
     }
 
 
-def load_annotation(ann_dir: Path, mask_id: str) -> dict[str, Any]:
-    path = ann_path(ann_dir, mask_id)
-    if not path.exists():
-        return blank_annotation(mask_id)
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return blank_annotation(mask_id)
-    merged = blank_annotation(mask_id)
-    merged.update(data)
-    merged["defects"] = data.get("defects", []) or []
-    merged["skip"]    = data.get("skip") or {"skipped": False, "reason": ""}
-    return merged
-
-
-def load_all(ann_dir: Path) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    if not ann_dir.exists():
-        return result
-    for p in sorted(ann_dir.glob("*.json")):
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-        result[str(data.get("mask_id") or p.stem)] = data
-    return result
-
-
 def is_done(ann: dict[str, Any]) -> bool:
     return bool(ann.get("skip", {}).get("skipped")) or ann.get("overall_severity") in SEVERITY
 
 
-def save_annotation(ann_dir: Path, ann: dict[str, Any]) -> None:
-    ann_dir.mkdir(parents=True, exist_ok=True)
-    ann["timestamp"] = utc_now()
-    with ann_path(ann_dir, ann["mask_id"]).open("w", encoding="utf-8") as f:
-        json.dump(ann, f, indent=2)
+def next_unfinished(files: list[Path], annotations: dict[str, dict[str, Any]], start: int) -> int:
+    for i in range(start, len(files)):
+        mid = mask_id_of(files[i])
+        if not is_done(annotations.get(mid, blank_annotation(mid))):
+            return i
+    return min(start, len(files) - 1)
 
 
-# ── Upload mode helpers (Streamlit Cloud — no server filesystem) ──────────────
-
-def is_upload_mode() -> bool:
-    return st.session_state.get("mode") == "upload"
-
-
-def um_all() -> dict[str, dict[str, Any]]:
-    return st.session_state.get("um_anns", {})
-
-
-def um_get(mask_id: str) -> dict[str, Any]:
-    return um_all().get(mask_id, blank_annotation(mask_id))
-
-
-def um_save(ann: dict[str, Any]) -> None:
-    ann["timestamp"] = utc_now()
-    st.session_state.setdefault("um_anns", {})[ann["mask_id"]] = ann
-
-
-def um_open_img(mask_id: str) -> Image.Image:
-    return Image.open(io.BytesIO(st.session_state["um_imgs"][mask_id])).convert("RGB")
-
-
-def um_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for mid, ann in um_all().items():
-            zf.writestr(f"{mid}.json", json.dumps(ann, indent=2))
-    return buf.getvalue()
-
-
-def um_csv() -> bytes:
-    order = st.session_state.get("um_order", [])
-    return csv_bytes([Path(f"{m}.png") for m in order], um_all())
-
-
-def add_border(img: Image.Image, sev: int | None, width: int = BORDER_WIDTH) -> Image.Image:
-    out   = img.copy().convert("RGB")
-    color = hex_to_rgb(severity_color(sev))
-    draw  = ImageDraw.Draw(out)
-    w, h  = out.size
-    for i in range(width):
-        draw.rectangle([i, i, w - 1 - i, h - 1 - i], outline=color)
-    return out
-
-
-def save_labeled_crop(img: Image.Image, mask_id: str, sev: int, labeled_dir: Path) -> None:
-    dest = labeled_dir / f"severity_{sev}"
-    dest.mkdir(parents=True, exist_ok=True)
-    add_border(img, sev).save(dest / f"{mask_id}.png")
-
+# ── CSV / download ────────────────────────────────────────────────────────────
 
 _CSV_FIELDS = [
     "mask_id", "overall_severity", "severity_label", "defect_count",
@@ -320,16 +259,6 @@ def _csv_row(mask_id: str, ann: dict[str, Any]) -> dict:
     }
 
 
-def write_csv(csv_path: Path, files: list[Path], annotations: dict[str, dict[str, Any]]) -> None:
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
-        w.writeheader()
-        for p in files:
-            mid = mask_id_of(p)
-            w.writerow(_csv_row(mid, annotations.get(mid, blank_annotation(mid))))
-
-
 def csv_bytes(files: list[Path], annotations: dict[str, dict[str, Any]]) -> bytes:
     buf = io.StringIO()
     w   = csv.DictWriter(buf, fieldnames=_CSV_FIELDS)
@@ -340,48 +269,22 @@ def csv_bytes(files: list[Path], annotations: dict[str, dict[str, Any]]) -> byte
     return buf.getvalue().encode("utf-8")
 
 
-def json_bytes(ann: dict[str, Any]) -> bytes:
-    """Convert annotation dict to JSON bytes."""
-    return json.dumps(ann, indent=2).encode("utf-8")
+# ── Image helpers ─────────────────────────────────────────────────────────────
 
-
-def trigger_downloads(ann: dict[str, Any], files: list[Path], annotations: dict[str, dict[str, Any]], mid: str) -> None:
-    """Trigger automatic downloads for JSON and CSV files."""
-    # Download individual JSON annotation
-    json_data = json_bytes(ann)
-    st.download_button(
-        label="📥 Download JSON",
-        data=json_data,
-        file_name=f"{mid}_annotation.json",
-        mime="application/json",
-        key=f"dl_json_{mid}_{datetime.now().timestamp()}",
-        use_container_width=False,
-    )
-
-    # Download updated CSV with all annotations
-    csv_data = csv_bytes(files, annotations)
-    st.download_button(
-        label="📥 Download CSV",
-        data=csv_data,
-        file_name="labels.csv",
-        mime="text/csv",
-        key=f"dl_csv_{mid}_{datetime.now().timestamp()}",
-        use_container_width=False,
-    )
+def add_border(img: Image.Image, sev: int | None, width: int = BORDER_WIDTH) -> Image.Image:
+    out   = img.copy().convert("RGB")
+    color = hex_to_rgb(severity_color(sev))
+    draw  = ImageDraw.Draw(out)
+    w, h  = out.size
+    for i in range(width):
+        draw.rectangle([i, i, w - 1 - i, h - 1 - i], outline=color)
+    return out
 
 
 def img_data_url(img: Image.Image) -> str:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
-
-
-def next_unfinished(files: list[Path], annotations: dict[str, dict[str, Any]], start: int) -> int:
-    for i in range(start, len(files)):
-        mid = mask_id_of(files[i])
-        if not is_done(annotations.get(mid, blank_annotation(mid))):
-            return i
-    return min(start, len(files) - 1)
 
 
 # ── Zoom viewer ───────────────────────────────────────────────────────────────
@@ -396,34 +299,12 @@ def zoom_viewer(img: Image.Image, key: str) -> None:
         </div>
         <script>
         (function() {{
-          const root = document.getElementById("z{key}");
-          const canvas = root.querySelector("canvas");
-          const hud = document.getElementById("hud{key}");
-          const ctx = canvas.getContext("2d");
-          const img = new Image();
-          let sc=1, base=1, ox=0, oy=0, drag=false, lx=0, ly=0;
-          function fit() {{
-            const r=root.getBoundingClientRect(), dpr=window.devicePixelRatio||1;
-            canvas.width=Math.max(1,r.width*dpr|0); canvas.height=Math.max(1,r.height*dpr|0);
-            ctx.setTransform(dpr,0,0,dpr,0,0);
-            base=Math.min(r.width/img.width, r.height/img.height); sc=base;
-            ox=(r.width-img.width*sc)/2; oy=(r.height-img.height*sc)/2; draw();
-          }}
-          function draw() {{
-            const r=root.getBoundingClientRect();
-            ctx.clearRect(0,0,r.width,r.height);
-            ctx.imageSmoothingEnabled=true;
-            ctx.drawImage(img,ox,oy,img.width*sc,img.height*sc);
-            hud.textContent=Math.round(sc/base*100)+"% · scroll: zoom · drag: pan · dbl-click: reset";
-          }}
-          img.onload=fit; img.src="{url}";
-          new ResizeObserver(fit).observe(root);
-          canvas.addEventListener("wheel",e=>{{
-            e.preventDefault();
-            const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top, prev=sc;
-            sc=Math.min(Math.max(base*0.5, sc*(e.deltaY<0?1.12:0.88)), base*14);
-            ox=mx-(mx-ox)/prev*sc; oy=my-(my-oy)/prev*sc; draw();
-          }},{{passive:false}});
+          const root=document.getElementById("z{key}"),canvas=root.querySelector("canvas"),hud=document.getElementById("hud{key}"),ctx=canvas.getContext("2d"),img=new Image();
+          let sc=1,base=1,ox=0,oy=0,drag=false,lx=0,ly=0;
+          function fit(){{const r=root.getBoundingClientRect(),dpr=window.devicePixelRatio||1;canvas.width=Math.max(1,r.width*dpr|0);canvas.height=Math.max(1,r.height*dpr|0);ctx.setTransform(dpr,0,0,dpr,0,0);base=Math.min(r.width/img.width,r.height/img.height);sc=base;ox=(r.width-img.width*sc)/2;oy=(r.height-img.height*sc)/2;draw();}}
+          function draw(){{const r=root.getBoundingClientRect();ctx.clearRect(0,0,r.width,r.height);ctx.imageSmoothingEnabled=true;ctx.drawImage(img,ox,oy,img.width*sc,img.height*sc);hud.textContent=Math.round(sc/base*100)+"% · scroll: zoom · drag: pan · dbl-click: reset";}}
+          img.onload=fit;img.src="{url}";new ResizeObserver(fit).observe(root);
+          canvas.addEventListener("wheel",e=>{{e.preventDefault();const r=canvas.getBoundingClientRect(),mx=e.clientX-r.left,my=e.clientY-r.top,prev=sc;sc=Math.min(Math.max(base*0.5,sc*(e.deltaY<0?1.12:0.88)),base*14);ox=mx-(mx-ox)/prev*sc;oy=my-(my-oy)/prev*sc;draw();}},{{passive:false}});
           canvas.addEventListener("mousedown",e=>{{drag=true;lx=e.clientX;ly=e.clientY;canvas.style.cursor="grabbing";}});
           window.addEventListener("mouseup",()=>{{drag=false;canvas.style.cursor="grab";}});
           window.addEventListener("mousemove",e=>{{if(!drag)return;ox+=e.clientX-lx;oy+=e.clientY-ly;lx=e.clientX;ly=e.clientY;draw();}});
@@ -527,7 +408,6 @@ def severity_selector(current: int | None, key: str) -> int:
     )
     selected = int(selected)
 
-    # Colored severity strip — all style attrs on one line to avoid parser issues
     cols = st.columns(5)
     for level, col in zip(SEVERITY.keys(), cols):
         meta   = SEVERITY[level]
@@ -543,7 +423,6 @@ def severity_selector(current: int | None, key: str) -> int:
             f'</div>'
         )
 
-    # Description line for the selected level
     meta = SEVERITY[selected]
     _html(
         f'<div style="margin-top:8px;padding:9px 13px;border-radius:5px;'
@@ -560,8 +439,7 @@ def guidelines_panel() -> None:
         parts = []
         for level, meta in SEVERITY.items():
             parts.append(
-                f'<div style="display:flex;align-items:flex-start;gap:10px;'
-                f'padding:8px 0;border-bottom:1px solid #f3f4f6;">'
+                f'<div style="display:flex;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid #f3f4f6;">'
                 f'<div style="flex:0 0 52px;text-align:center;padding:5px 0;border-radius:4px;'
                 f'background:{meta["color"]};color:{meta["fg"]};font-weight:700;font-size:0.85rem;">{level}</div>'
                 f'<div><div style="font-weight:600;font-size:0.82rem;">{meta["label"]}</div>'
@@ -581,8 +459,7 @@ def guide_panel(current_panel: str) -> None:
             row_bg    = "#eff6ff" if is_active else "transparent"
             title_col = "#1d4ed8" if is_active else "#111827"
             _html(
-                f'<div style="display:flex;align-items:flex-start;gap:10px;'
-                f'padding:9px 10px;border-radius:5px;margin-bottom:4px;background:{row_bg};">'
+                f'<div style="display:flex;align-items:flex-start;gap:10px;padding:9px 10px;border-radius:5px;margin-bottom:4px;background:{row_bg};">'
                 f'<div style="flex:0 0 22px;height:22px;border-radius:50%;background:{num_bg};color:{num_fg};'
                 f'font-size:0.7rem;font-weight:700;display:flex;align-items:center;justify-content:center;min-width:22px;">{i+1}</div>'
                 f'<div><div style="font-size:0.8rem;font-weight:600;color:{title_col};">{title}</div>'
@@ -647,21 +524,20 @@ def defect_form(shapes: list[dict], prefix: str) -> list[dict[str, Any]]:
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 
-def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path: Path | None, current_mid: str = "", upload: bool = False) -> str:
-    total     = len(files)
-    completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
-    skipped   = sum(1 for a in annotations.values() if a.get("skip", {}).get("skipped"))
-    counts    = {k: sum(1 for a in annotations.values() if a.get("overall_severity") == k) for k in SEVERITY}
-    pct       = round(100 * completed / total) if total else 0
+def sidebar(files: list[Path], current_mid: str = "") -> str:
+    annotations = all_anns()
+    total       = len(files)
+    completed   = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
+    skipped     = sum(1 for a in annotations.values() if a.get("skip", {}).get("skipped"))
+    counts      = {k: sum(1 for a in annotations.values() if a.get("overall_severity") == k) for k in SEVERITY}
+    pct         = round(100 * completed / total) if total else 0
 
-    # Step completion state for the current bean
     cur_ann  = annotations.get(current_mid, {})
     has_sev  = cur_ann.get("overall_severity") is not None
     has_def  = bool(cur_ann.get("defects"))
     is_skip  = bool(cur_ann.get("skip", {}).get("skipped"))
 
     with st.sidebar:
-        # ── Brand ──
         _html(
             '<div style="padding:18px 0 14px;">'
             '<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#94a3b8;">Bean Quality</div>'
@@ -669,9 +545,7 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
             '</div>'
         )
 
-        _html('<div style="height:1px;background:#e2e8f0;margin-bottom:16px;"></div>')
-
-        # ── Step navigator ──
+        # ── Panel step navigator ──
         if "_switch_to_panel" in st.session_state:
             st.session_state["workflow_panel"] = st.session_state.pop("_switch_to_panel")
         if "workflow_panel" not in st.session_state:
@@ -680,12 +554,9 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
         panel = st.session_state["workflow_panel"]
 
         step_defs = [
-            ("Inspect & Rate", "Inspect & Rate",
-             "Rate overall severity",      has_sev or is_skip),
-            ("Draw Defects",   "Draw Defects",
-             "Mark individual defects",    has_def or is_skip),
-            ("Saved JSON",     "Review JSON",
-             "Inspect saved record",       False),
+            ("Inspect & Rate", "Inspect & Rate", "Rate overall severity",   has_sev or is_skip),
+            ("Draw Defects",   "Draw Defects",   "Mark individual defects", has_def or is_skip),
+            ("Saved JSON",     "Review JSON",     "Inspect saved record",    False),
         ]
 
         _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Steps</div>')
@@ -694,44 +565,27 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
         for i, (panel_key, label, sub, step_done) in enumerate(step_defs, 1):
             is_active = panel_key == panel
             if step_done:
-                circle_bg  = "#16a34a"
-                circle_fg  = "#fff"
-                circle_val = "&#10003;"
-                label_col  = "#6b7280"
-                sub_col    = "#9ca3af"
-                row_bg     = "transparent"
-                row_border = "transparent"
-                left_bar   = "#16a34a"
+                circle_bg, circle_fg, circle_val = "#16a34a", "#fff", "&#10003;"
+                label_col, sub_col = "#6b7280", "#9ca3af"
+                row_bg, row_border, left_bar = "transparent", "transparent", "#16a34a"
             elif is_active:
-                circle_bg  = "#2563eb"
-                circle_fg  = "#fff"
-                circle_val = str(i)
-                label_col  = "#1e40af"
-                sub_col    = "#3b82f6"
-                row_bg     = "#eff6ff"
-                row_border = "#bfdbfe"
-                left_bar   = "#2563eb"
+                circle_bg, circle_fg, circle_val = "#2563eb", "#fff", str(i)
+                label_col, sub_col = "#1e40af", "#3b82f6"
+                row_bg, row_border, left_bar = "#eff6ff", "#bfdbfe", "#2563eb"
             else:
-                circle_bg  = "#fff"
-                circle_fg  = "#9ca3af"
-                circle_val = str(i)
-                label_col  = "#9ca3af"
-                sub_col    = "#cbd5e1"
-                row_bg     = "transparent"
-                row_border = "#e5e7eb"
-                left_bar   = "#e5e7eb"
+                circle_bg, circle_fg, circle_val = "#fff", "#9ca3af", str(i)
+                label_col, sub_col = "#9ca3af", "#cbd5e1"
+                row_bg, row_border, left_bar = "transparent", "#e5e7eb", "#e5e7eb"
 
             step_parts.append(
-                f'<div style="display:flex;align-items:center;gap:11px;padding:9px 12px;'
-                f'border-radius:7px;background:{row_bg};border:1px solid {row_border};'
-                f'margin-bottom:4px;border-left:3px solid {left_bar};">'
+                f'<div style="display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:7px;'
+                f'background:{row_bg};border:1px solid {row_border};margin-bottom:4px;border-left:3px solid {left_bar};">'
                 f'<div style="flex:0 0 24px;height:24px;border-radius:50%;background:{circle_bg};'
                 f'color:{circle_fg};font-size:0.68rem;font-weight:800;display:flex;align-items:center;'
                 f'justify-content:center;min-width:24px;border:1.5px solid {row_border};">{circle_val}</div>'
-                f'<div>'
-                f'<div style="font-size:0.8rem;font-weight:{"700" if is_active else "500"};color:{label_col};line-height:1.2;">{label}</div>'
-                f'<div style="font-size:0.68rem;color:{sub_col};margin-top:2px;">{sub}</div>'
-                f'</div></div>'
+                f'<div><div style="font-size:0.8rem;font-weight:{"700" if is_active else "500"};color:{label_col};line-height:1.2;">{label}</div>'
+                f'<div style="font-size:0.68rem;color:{sub_col};margin-top:2px;">{sub}</div></div>'
+                f'</div>'
             )
         _html("".join(step_parts))
 
@@ -752,7 +606,6 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
 
         # ── Severity breakdown ──
         _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px;">By severity</div>')
-
         sev_parts = []
         for level, count in counts.items():
             meta  = SEVERITY[level]
@@ -772,22 +625,20 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
 
         _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
 
-        # ── Footer actions ──
-        if upload:
-            st.download_button("Download annotations (ZIP)", data=um_zip(),
-                               file_name="annotations.zip", mime="application/zip",
-                               use_container_width=True)
-            st.download_button("Download labels.csv", data=um_csv(),
-                               file_name="labels.csv", mime="text/csv",
-                               use_container_width=True)
-            st.caption("Download regularly — refreshing the page will clear your session.")
-        else:
-            st.download_button("Download labels.csv", data=csv_bytes(files, annotations),
-                               file_name="labels.csv", mime="text/csv", use_container_width=True)
-            st.caption(f"Auto-saved to {csv_path.name} after each save.")
+        # ── Downloads ──
+        _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Export</div>')
+        st.download_button("Download annotations (ZIP)", data=anns_zip(),
+                           file_name="annotations.zip", mime="application/zip",
+                           use_container_width=True)
+        st.download_button("Download labels.csv", data=anns_csv(),
+                           file_name="labels.csv", mime="text/csv",
+                           use_container_width=True)
+        st.caption("Download regularly — refreshing clears your session.")
+
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Change folder", use_container_width=True):
-            st.session_state["ready"] = False
+        if st.button("Start over", use_container_width=True):
+            for key in ["imgs", "img_order", "anns", "annotator", "ready", "workflow_panel"]:
+                st.session_state.pop(key, None)
             st.rerun()
 
     return panel
@@ -795,58 +646,21 @@ def sidebar(files: list[Path], annotations: dict[str, dict[str, Any]], csv_path:
 
 # ── Setup page ────────────────────────────────────────────────────────────────
 
-def _try_start(crops: str, output: str, name: str) -> bool:
-    """Validate paths and start the session. Returns True on success."""
-    if not crops or not output:
-        st.error("Both folder paths are required.")
-        return False
-    crops_dir = Path(crops).expanduser()
-    out_dir   = Path(output).expanduser()
-    if not crops_dir.exists():
-        st.error(f"Crops folder not found: {crops_dir}")
-        return False
-    files = sorted(crops_dir.glob("*.png"))
-    if not files:
-        st.error(f"No PNG files found in {crops_dir}.")
-        return False
-    save_config(str(crops_dir), str(out_dir), name.strip())
-    st.session_state.update({"mode": "local", "crops_dir": str(crops_dir), "output_dir": str(out_dir),
-                              "annotator": name.strip(), "ready": True})
-    return True
-
-
 def setup_page() -> None:
-    cfg         = load_config()
-    last_crops  = cfg.get("crops_dir",  "")
-    last_output = cfg.get("output_dir", "")
-    last_name   = cfg.get("annotator",  "")
-
-    # Only treat as valid if the folder actually exists and has PNGs on THIS machine
-    crops_ok  = bool(last_crops  and Path(last_crops).exists()
-                     and sorted(Path(last_crops).glob("*.png")))
-    output_ok = bool(last_output and Path(last_output).expanduser().parent.exists())
-    has_local = crops_ok and output_ok
-
-    # If config has stale paths (e.g. from another machine / old temp dirs),
-    # don't pre-fill the inputs with garbage
-    pre_crops  = last_crops  if crops_ok  else ""
-    pre_output = last_output if output_ok else ""
-
     _, col, _ = st.columns([1, 1.8, 1])
     with col:
         _html(
             '<div style="padding:28px 0 18px;text-align:center;">'
             '<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Bean Quality Annotator</div>'
             '<div style="font-size:1.5rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Start a session</div>'
-            '<p style="font-size:0.84rem;color:#6b7280;margin:0;">Upload your bean images to annotate.</p>'
+            '<p style="font-size:0.84rem;color:#6b7280;margin:0;">Upload your bean images to begin annotating.</p>'
             '</div>'
         )
 
-        # ── Primary: file upload (works on deployed / Streamlit Cloud) ──
-        annotator_name = st.text_input("Annotator name", value=last_name, placeholder="Optional")
+        annotator = st.text_input("Annotator name", placeholder="Optional — your name or initials")
 
         img_files = st.file_uploader(
-            "Select bean images (PNG)",
+            "Bean images (PNG / JPG)",
             type=["png", "jpg", "jpeg"],
             accept_multiple_files=True,
             help="Select all images you want to annotate in this session.",
@@ -855,103 +669,71 @@ def setup_page() -> None:
             "Resume — upload previous annotation JSONs (optional)",
             type=["json"],
             accept_multiple_files=True,
-            help="Upload .json files saved from a previous session to continue where you left off.",
+            help="Upload .json files from a previous session to continue where you left off.",
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Start annotating", type="primary", use_container_width=True, key="start_upload"):
+
+        if st.button("Start annotating", type="primary", use_container_width=True):
             if not img_files:
-                st.error("Select at least one image file.")
-            else:
-                imgs: dict[str, bytes] = {Path(f.name).stem: f.getvalue() for f in img_files}
-                prior: dict[str, dict] = {}
-                for f in (ann_files or []):
-                    try:
-                        data = json.loads(f.getvalue())
-                        prior[str(data.get("mask_id") or Path(f.name).stem)] = data
-                    except Exception:
-                        pass
-                save_config("", "", annotator_name.strip())
-                st.session_state.update({
-                    "mode":     "upload",
-                    "um_imgs":  imgs,
-                    "um_order": sorted(imgs.keys()),
-                    "um_anns":  prior,
-                    "annotator": annotator_name.strip(),
-                    "ready":    True,
-                })
-                st.rerun()
+                st.error("Select at least one image file to continue.")
+                return
 
-        # ── Secondary: local folder (only works when running locally) ──
-        with st.expander("Running locally? Use a folder path instead"):
-            st.caption("Only works when you run `streamlit run annotate_beans.py` on your own machine.")
-            if has_local:
-                ann_dir = Path(last_output) / "annotations"
-                done    = len(list(ann_dir.glob("*.json"))) if ann_dir.exists() else 0
-                total   = len(sorted(Path(last_crops).glob("*.png")))
-                _html(
-                    f'<div style="padding:8px 12px;background:#f0fdf4;border:1px solid #bbf7d0;'
-                    f'border-radius:6px;margin-bottom:10px;">'
-                    f'<div style="font-size:0.68rem;font-weight:700;color:#16a34a;text-transform:uppercase;">Last local session</div>'
-                    f'<div style="font-size:0.78rem;color:#166534;margin-top:2px;word-break:break-all;">{last_crops}</div>'
-                    f'<div style="font-size:0.7rem;color:#15803d;margin-top:1px;">{done} of {total} annotated</div>'
-                    f'</div>'
-                )
-                rc, cc = st.columns([3, 1])
-                with rc:
-                    if st.button("Resume local session", type="primary", use_container_width=True):
-                        if _try_start(last_crops, last_output, last_name):
-                            st.rerun()
-                with cc:
-                    if st.button("Clear", use_container_width=True):
-                        try:
-                            CONFIG_FILE.unlink(missing_ok=True)
-                        except OSError:
-                            pass
-                        st.rerun()
-                st.markdown("<br>", unsafe_allow_html=True)
+            imgs: dict[str, bytes] = {}
+            for f in img_files:
+                mid = Path(f.name).stem
+                try:
+                    Image.open(io.BytesIO(f.getvalue()))  # validate
+                    imgs[mid] = f.getvalue()
+                except Exception:
+                    st.warning(f"Skipped '{f.name}' — not a valid image.")
 
-            crops  = st.text_input("Crops folder",  value=pre_crops,  placeholder="/path/to/png_crops")
-            output = st.text_input("Output folder", value=pre_output, placeholder="/path/to/output")
-            if st.button("Start with local folder", use_container_width=True, key="start_local"):
-                if _try_start(crops, output, annotator_name):
-                    st.rerun()
+            if not imgs:
+                st.error("No valid images found in the selection.")
+                return
+
+            prior: dict[str, dict] = {}
+            for f in (ann_files or []):
+                try:
+                    data = json.loads(f.getvalue())
+                    mid  = str(data.get("mask_id") or Path(f.name).stem)
+                    prior[mid] = data
+                except Exception:
+                    pass
+
+            st.session_state.update({
+                "imgs":      imgs,
+                "img_order": sorted(imgs.keys()),
+                "anns":      prior,
+                "annotator": annotator.strip(),
+                "ready":     True,
+            })
+            st.rerun()
 
         st.divider()
-        _html('<div style="font-size:0.74rem;color:#9ca3af;text-align:center;line-height:1.7;">'
-              'Annotate &nbsp;·&nbsp; Download JSON &nbsp;·&nbsp; Share offline'
-              '</div>')
+        _html(
+            '<div style="font-size:0.74rem;color:#9ca3af;text-align:center;line-height:1.7;">'
+            'Annotate &nbsp;·&nbsp; Download ZIP when done &nbsp;·&nbsp; Upload JSONs next session to resume'
+            '</div>'
+        )
 
 
-# ── Main annotation view ──────────────────────────────────────────────────────
+# ── Annotation view ───────────────────────────────────────────────────────────
 
 def annotation_view() -> None:
-    _upload = is_upload_mode()
-
-    if _upload:
-        files       = [Path(f"{m}.png") for m in st.session_state.get("um_order", [])]
-        annotations = um_all()
-        ann_dir = labeled_dir = csv_path = None
-    else:
-        crops_dir   = Path(st.session_state["crops_dir"])
-        output_dir  = Path(st.session_state["output_dir"])
-        ann_dir     = output_dir / "annotations"
-        labeled_dir = output_dir / "labeled"
-        csv_path    = output_dir / "labels.csv"
-        save_config(str(crops_dir), str(output_dir), st.session_state.get("annotator", ""))
-        files       = sorted(crops_dir.glob("*.png"))
-        annotations = load_all(ann_dir)
-        write_csv(csv_path, files, annotations)
-
+    files = [Path(f"{m}.png") for m in st.session_state.get("img_order", [])]
     total = len(files)
+
     if total == 0:
-        st.error("No images found. Go back and upload PNG files.")
+        st.error("No images loaded. Go back and upload PNG files.")
         if st.button("Back to setup"):
             st.session_state["ready"] = False
             st.rerun()
         return
 
-    idx_key = "um_idx" if _upload else f"idx_{st.session_state.get('crops_dir','')}"
+    annotations = all_anns()
+
+    idx_key = "idx"
     if idx_key not in st.session_state:
         st.session_state[idx_key] = next_unfinished(files, annotations, 0)
 
@@ -960,20 +742,19 @@ def annotation_view() -> None:
     file = files[cur]
     mid  = mask_id_of(file)
 
-    panel = sidebar(files, annotations, csv_path, current_mid=mid, upload=_upload)
-    ann   = um_get(mid) if _upload else load_annotation(ann_dir, mid)
+    panel = sidebar(files, current_mid=mid)
+    ann   = get_ann(mid)
 
     try:
-        img = um_open_img(mid) if _upload else Image.open(file).convert("RGB")
+        img = open_img(mid)
     except Exception as e:
         st.error(f"Cannot open image '{mid}': {e}")
         st.session_state[idx_key] = min(cur + 1, total - 1)
         st.rerun()
         return
 
-    sev     = ann.get("overall_severity")
-    skipped = ann.get("skip", {}).get("skipped")
-
+    sev       = ann.get("overall_severity")
+    skipped   = ann.get("skip", {}).get("skipped")
     completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
     pct       = round(100 * completed / total) if total else 0
 
@@ -986,8 +767,8 @@ def annotation_view() -> None:
             f'<span style="font-size:0.75rem;color:#9ca3af;margin-left:10px;">{mid}</span>'
             f'</div>'
         )
-        annotator = st.session_state.get("annotator") or "—"
-        st.caption(f"Annotator: {annotator}  ·  {completed} of {total} done ({pct}%)")
+        annotator_name = st.session_state.get("annotator") or "—"
+        st.caption(f"Annotator: {annotator_name}  ·  {completed} of {total} done ({pct}%)")
     with h_right:
         if sev:
             meta = SEVERITY[sev]
@@ -1024,13 +805,12 @@ def annotation_view() -> None:
         st.session_state[idx_key] = cur + 1
         st.rerun()
     if n4.button("Next unfinished", use_container_width=True):
-        latest = um_all() if _upload else load_all(ann_dir)
-        st.session_state[idx_key] = next_unfinished(files, latest, cur + 1)
+        st.session_state[idx_key] = next_unfinished(files, all_anns(), cur + 1)
         st.rerun()
 
     st.divider()
 
-    # ── Session state init ──
+    # ── Widget state init ──
     sev_key   = f"sev_{mid}"
     notes_key = f"notes_{mid}"
     if sev_key not in st.session_state:
@@ -1057,7 +837,7 @@ def annotation_view() -> None:
                                  key=notes_key, height=80, label_visibility="collapsed")
 
     elif panel == "Draw Defects":
-        st.caption("Draw one shape per defect. Fill in type and severity in the form below the canvas.")
+        st.caption("Draw one shape per defect. Fill in type and severity below the canvas.")
         if hasattr(st, "segmented_control"):
             mode = st.segmented_control("Mode", ["rect", "polygon"], default="rect", key=f"mode_{mid}")
         else:
@@ -1075,8 +855,7 @@ def annotation_view() -> None:
             defects = ann.get("defects", []) or []
             st.caption("No shapes drawn. Existing defects will be preserved on save.")
 
-        saved = ann.get("defects", []) or []
-        with st.expander(f"Saved defects ({len(saved)})"):
+        with st.expander(f"Saved defects ({len(ann.get('defects', []) or [])})"):
             existing_defects_table(ann)
 
     else:
@@ -1085,7 +864,7 @@ def annotation_view() -> None:
             st.caption(f"Last saved: {ann['timestamp']}")
         st.json(ann)
 
-    # ── Actions bar (panel-aware) ──
+    # ── Actions ──
     st.divider()
 
     def _do_save(advance_to_next: bool) -> None:
@@ -1099,12 +878,7 @@ def annotation_view() -> None:
             "timestamp":          utc_now(),
             "annotator":          st.session_state.get("annotator", ""),
         }
-        if _upload:
-            um_save(updated)
-        else:
-            save_annotation(ann_dir, updated)
-            write_csv(csv_path, files, load_all(ann_dir))
-            save_labeled_crop(img, mid, int(cur_sev), labeled_dir)
+        save_ann(updated)
         st.toast(f"Saved — {mid} · Severity {cur_sev} ({SEVERITY[int(cur_sev)]['label']})")
         if advance_to_next:
             st.session_state[idx_key] = min(cur + 1, total - 1)
@@ -1115,7 +889,7 @@ def annotation_view() -> None:
             skip_reason = st.text_input("Reason", key=f"skipreason_{mid}",
                                         placeholder="Blurred, duplicate, unclear...",
                                         label_visibility="collapsed")
-            st.caption("Skip when annotation is not reliable.")
+            st.caption("Skip when the image cannot be reliably annotated.")
             if st.button("Confirm skip", use_container_width=True):
                 updated = blank_annotation(mid)
                 updated.update({
@@ -1125,18 +899,13 @@ def annotation_view() -> None:
                     "timestamp":     utc_now(),
                     "annotator":     st.session_state.get("annotator", ""),
                 })
-                if _upload:
-                    um_save(updated)
-                else:
-                    save_annotation(ann_dir, updated)
-                    write_csv(csv_path, files, load_all(ann_dir))
+                save_ann(updated)
                 st.toast(f"Skipped — {mid}")
                 st.session_state[idx_key] = min(cur + 1, total - 1)
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
                 st.rerun()
 
     if panel == "Inspect & Rate":
-        # Step 1: Save (stay on step 1) + Next Step + Skip
         s_col, n_col, skip_col = st.columns([1.2, 1.2, 1])
         with s_col:
             if st.button("Save", type="primary", use_container_width=True):
@@ -1151,7 +920,6 @@ def annotation_view() -> None:
             _skip_widget()
 
     elif panel == "Draw Defects":
-        # Step 2: Previous Step + Save (advance to next bean) + Skip
         p_col, s_col, skip_col = st.columns([1.2, 1.2, 1])
         with p_col:
             if st.button("← Previous Step", use_container_width=True):
@@ -1165,7 +933,6 @@ def annotation_view() -> None:
             _skip_widget()
 
     else:
-        # Review JSON panel — just save + back
         s_col, b_col = st.columns([1.2, 1])
         with s_col:
             if st.button("Save", type="primary", use_container_width=True):
@@ -1177,7 +944,7 @@ def annotation_view() -> None:
                 st.rerun()
 
     if completed == total:
-        st.success("All beans annotated or skipped. Download labels.csv from the sidebar.")
+        st.success("All beans annotated or skipped. Download the ZIP from the sidebar.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
