@@ -6,7 +6,7 @@ Streamlit app for annotating bean crop images with quality severity scores and d
 
 - 1-5 overall bean severity scale
 - Zoomable and pannable image inspection
-- Rectangle and polygon defect annotation
+- Polygon defect annotation
 - Defect type labels and notes
 - Skip option for unclear beans
 - In-session annotation records

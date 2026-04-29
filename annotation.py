@@ -115,7 +115,7 @@ SEVERITY = {
 STEPS = [
     ("Inspect",       "Use the zoom viewer. Scroll to zoom, drag to pan, double-click to reset."),
     ("Rate",          "Assign the overall severity from 1 (Excellent) to 5 (Severe)."),
-    ("Draw defects",  "Switch to Draw tab. Draw a rectangle or polygon around each defect."),
+    ("Draw defects",  "Switch to Draw tab. Draw a polygon around each defect."),
     ("Label defects", "For each shape select the defect type, severity, and add notes."),
     ("Save",          "Click Save. Download the annotations ZIP from the sidebar regularly."),
 ]
@@ -1064,11 +1064,8 @@ def annotation_view() -> None:
                                  key=notes_key, height=80, label_visibility="collapsed")
 
     elif panel == "Draw Defects":
-        st.caption("Draw one shape per defect. Fill in type and severity below the canvas.")
-        if hasattr(st, "segmented_control"):
-            mode = st.segmented_control("Mode", ["rect", "polygon"], default="rect", key=f"mode_{mid}")
-        else:
-            mode = st.radio("Mode", ["rect", "polygon"], horizontal=True, key=f"mode_{mid}")
+        st.caption("Draw one closed polygon per defect. Fill in type and severity below the canvas.")
+        mode = "polygon"
 
         objects, canvas_scale = draw_canvas(img, canvas_key=f"cv_{mid}", mode=mode, stroke=severity_color(cur_sev))
 
