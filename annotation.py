@@ -235,6 +235,7 @@ def project_bundle_bytes() -> bytes:
         "annotation_version": ANNOTATION_VER,
         "annotator": st.session_state.get("annotator", ""),
         "image_order": order,
+        "image_filenames": {mid: image_filename_of(mid) for mid in order},
         "annotation_count": len(annotations),
     }
 
@@ -244,10 +245,15 @@ def project_bundle_bytes() -> bytes:
         zf.writestr("labels.csv", csv_bytes(files, annotations))
         for mid in order:
             if mid in images:
-                zf.writestr(f"images/{mid}.png", image_png_bytes(images[mid]))
+                zf.writestr(f"images/{image_filename_of(mid)}", image_png_bytes(images[mid]))
             ann = annotations.get(mid, blank_annotation(mid))
+            ann = normalize_annotation_for_export(ann, mid)
             zf.writestr(f"annotations/{mid}.json", json.dumps(ann, indent=2))
     return buf.getvalue()
+
+
+def image_filename_of(mask_id: str) -> str:
+    return f"{mask_id}.png"
 
 
 def image_png_bytes(raw: bytes) -> bytes:
@@ -255,6 +261,18 @@ def image_png_bytes(raw: bytes) -> bytes:
     out = io.BytesIO()
     Image.open(io.BytesIO(raw)).convert("RGB").save(out, format="PNG")
     return out.getvalue()
+
+
+def normalize_annotation_for_export(ann: dict[str, Any], mask_id: str) -> dict[str, Any]:
+    """Ensure exported records are keyed by the image stem and use closed polygons."""
+    out = dict(ann)
+    image_stem = str(out.get("image_stem") or mask_id)
+    out["annotation_version"] = out.get("annotation_version", ANNOTATION_VER)
+    out["mask_id"] = str(out.get("mask_id") or mask_id)
+    out["image_stem"] = image_stem
+    out["image_filename"] = str(out.get("image_filename") or image_filename_of(image_stem))
+    out["defects"] = [normalize_defect_geometry(d) for d in (out.get("defects", []) or [])]
+    return out
 
 
 def load_resume_uploads(uploaded_files: list[Any]) -> tuple[dict[str, bytes], dict[str, dict], list[str], list[str]]:
@@ -271,7 +289,7 @@ def load_resume_uploads(uploaded_files: list[Any]) -> tuple[dict[str, bytes], di
         if valid_mask_ids is not None and mid not in valid_mask_ids:
             unmatched.append(source_name)
             return
-        prior[mid] = data
+        prior[mid] = normalize_annotation_for_export(data, mid)
 
     for f in uploaded_files or []:
         name = f.name
@@ -339,6 +357,8 @@ def blank_annotation(mask_id: str) -> dict[str, Any]:
     return {
         "annotation_version": ANNOTATION_VER,
         "mask_id":            mask_id,
+        "image_stem":         mask_id,
+        "image_filename":     f"{mask_id}.png",
         "overall_severity":   None,
         "overall_notes":      "",
         "defects":            [],
@@ -363,14 +383,18 @@ def next_unfinished(files: list[Path], annotations: dict[str, dict[str, Any]], s
 # ── CSV / download ────────────────────────────────────────────────────────────
 
 _CSV_FIELDS = [
-    "mask_id", "overall_severity", "severity_label", "defect_count",
+    "image_stem", "image_filename", "mask_id", "overall_severity", "severity_label", "defect_count",
     "skipped", "skip_reason", "overall_notes", "timestamp", "annotator",
 ]
 
 
 def _csv_row(mask_id: str, ann: dict[str, Any]) -> dict:
     sev = ann.get("overall_severity")
+    image_stem = ann.get("image_stem") or mask_id
+    image_filename = ann.get("image_filename") or f"{image_stem}.png"
     return {
+        "image_stem":       image_stem,
+        "image_filename":   image_filename,
         "mask_id":          mask_id,
         "overall_severity": sev or "",
         "severity_label":   SEVERITY.get(sev, {}).get("label", ""),
@@ -510,13 +534,56 @@ def fabric_to_shape(obj: dict[str, Any], scale: float) -> dict[str, Any] | None:
         pts = obj.get("points") or []
         if pts:
             poly = [{"x": round((l+float(p.get("x",0)))*inv,2), "y": round((tp+float(p.get("y",0)))*inv,2)} for p in pts]
+            poly = close_polygon(poly)
             if len(poly) >= 3:
                 return {"shape": "polygon", "polygon": poly}
         elif obj.get("path"):
-            return {"shape": "path",
-                    "bbox": {"x": round(l*inv,2), "y": round(tp*inv,2), "width": round(w*inv,2), "height": round(h*inv,2)},
-                    "path": obj.get("path")}
+            poly = path_to_polygon(obj.get("path"), inv)
+            bbox = {"x": round(l*inv,2), "y": round(tp*inv,2), "width": round(w*inv,2), "height": round(h*inv,2)}
+            if len(poly) >= 4:
+                return {"shape": "polygon", "bbox": bbox, "polygon": poly}
+            return {"shape": "path", "bbox": bbox, "path": obj.get("path")}
     return None
+
+
+def close_polygon(points: list[dict[str, float]]) -> list[dict[str, float]]:
+    if len(points) < 3:
+        return points
+    first = points[0]
+    last = points[-1]
+    if first.get("x") != last.get("x") or first.get("y") != last.get("y"):
+        points = [*points, {"x": first["x"], "y": first["y"]}]
+    return points
+
+
+def path_to_polygon(path: Any, inv: float) -> list[dict[str, float]]:
+    points: list[dict[str, float]] = []
+    if not isinstance(path, list):
+        return points
+    for cmd in path:
+        if not isinstance(cmd, list) or not cmd:
+            continue
+        op = str(cmd[0]).upper()
+        if op in {"M", "L"} and len(cmd) >= 3:
+            points.append({"x": round(float(cmd[1]) * inv, 2), "y": round(float(cmd[2]) * inv, 2)})
+        elif op == "Z":
+            break
+    return close_polygon(points)
+
+
+def normalize_defect_geometry(defect: dict[str, Any]) -> dict[str, Any]:
+    out = dict(defect)
+    if out.get("polygon"):
+        out["shape"] = "polygon"
+        out["polygon"] = close_polygon([{"x": float(p["x"]), "y": float(p["y"])} for p in out.get("polygon", [])])
+    elif out.get("path"):
+        poly = path_to_polygon(out.get("path"), 1.0)
+        if len(poly) >= 4:
+            out["shape"] = "polygon"
+            out["polygon"] = poly
+    if out.get("shape") == "polygon":
+        out["closed"] = True
+    return out
 
 
 def shape_area(s: dict[str, Any]) -> float:
@@ -1022,9 +1089,11 @@ def annotation_view() -> None:
         updated = {
             "annotation_version": ANNOTATION_VER,
             "mask_id":            mid,
+            "image_stem":         mid,
+            "image_filename":     image_filename_of(mid),
             "overall_severity":   int(cur_sev),
             "overall_notes":      cur_notes.strip(),
-            "defects":            defects,
+            "defects":            [normalize_defect_geometry(d) for d in defects],
             "skip":               {"skipped": False, "reason": ""},
             "timestamp":          utc_now(),
             "annotator":          st.session_state.get("annotator", ""),
@@ -1044,8 +1113,10 @@ def annotation_view() -> None:
             if st.button("Confirm skip", use_container_width=True):
                 updated = blank_annotation(mid)
                 updated.update({
+                    "image_stem":     mid,
+                    "image_filename": image_filename_of(mid),
                     "overall_notes": cur_notes.strip(),
-                    "defects":       ann.get("defects", []) or [],
+                    "defects":       [normalize_defect_geometry(d) for d in (ann.get("defects", []) or [])],
                     "skip":          {"skipped": True, "reason": skip_reason.strip() or "No reason given"},
                     "timestamp":     utc_now(),
                     "annotator":     st.session_state.get("annotator", ""),
