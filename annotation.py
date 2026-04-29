@@ -93,8 +93,6 @@ MIN_CANVAS_WIDTH = 620
 MIN_DEFECT_AREA  = 25
 ANNOTATION_VER   = 3
 RESAMPLE         = getattr(Image, "Resampling", Image).LANCZOS
-ASSET_DIR        = Path(__file__).parent / "assets"
-LOGO_FILE        = ASSET_DIR / "msu_dry_bean_logo.png"
 
 DEFECT_TYPES = [
     "Crack", "Hole", "Discoloration", "Mold", "Spot",
@@ -873,15 +871,10 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
 def setup_page() -> None:
     _, col, _ = st.columns([1, 1.8, 1])
     with col:
-        if LOGO_FILE.exists():
-            _, logo_col, _ = st.columns([1, 2, 1])
-            with logo_col:
-                st.image(str(LOGO_FILE), use_container_width=True)
-
         _html(
             '<div style="padding:28px 0 18px;text-align:center;">'
-            '<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Bean Quality Annotator</div>'
-            '<div style="font-size:1.5rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Start a session</div>'
+            '<div style="font-size:1.85rem;font-weight:900;letter-spacing:0;text-transform:uppercase;color:#0f172a;margin-bottom:8px;">Bean Quality Annotator</div>'
+            '<div style="font-size:1.35rem;font-weight:800;letter-spacing:0;color:#0f172a;margin:0 0 6px;">Start a session</div>'
             '<p style="font-size:0.84rem;color:#6b7280;margin:0;">Upload your bean images to begin annotating.</p>'
             '</div>'
         )
