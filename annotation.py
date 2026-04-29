@@ -93,6 +93,8 @@ MIN_CANVAS_WIDTH = 620
 MIN_DEFECT_AREA  = 25
 ANNOTATION_VER   = 3
 RESAMPLE         = getattr(Image, "Resampling", Image).LANCZOS
+ASSET_DIR        = Path(__file__).parent / "assets"
+LOGO_FILE        = ASSET_DIR / "msu_dry_bean_logo.png"
 
 DEFECT_TYPES = [
     "Crack", "Hole", "Discoloration", "Mold", "Spot",
@@ -496,7 +498,7 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
         initial_drawing = {"version": "4.4.0", "background": ""}
         component_value = drawable_canvas._component_func(
             fillColor="rgba(255,255,255,0.08)",
-            strokeWidth=2,
+            strokeWidth=4,
             strokeColor=stroke,
             backgroundColor="",
             backgroundImageURL=bg_url,
@@ -506,7 +508,7 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
             drawingMode=mode,
             initialDrawing=initial_drawing,
             displayToolbar=True,
-            displayRadius=3,
+            displayRadius=5,
             key=canvas_key,
             default=None,
         )
@@ -871,6 +873,11 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
 def setup_page() -> None:
     _, col, _ = st.columns([1, 1.8, 1])
     with col:
+        if LOGO_FILE.exists():
+            _, logo_col, _ = st.columns([1, 2, 1])
+            with logo_col:
+                st.image(str(LOGO_FILE), use_container_width=True)
+
         _html(
             '<div style="padding:28px 0 18px;text-align:center;">'
             '<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Bean Quality Annotator</div>'

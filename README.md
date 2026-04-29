@@ -2,6 +2,9 @@
 
 Streamlit app for annotating bean crop images with quality severity scores and defect regions.
 
+
+checkout: https://parimalnathreddy-bean-annotator-annotation-h3zurb.streamlit.app/
+
 ## Features
 
 - 1-5 overall bean severity scale
