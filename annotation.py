@@ -774,11 +774,17 @@ def setup_page() -> None:
     last_crops  = cfg.get("crops_dir",  "")
     last_output = cfg.get("output_dir", "")
     last_name   = cfg.get("annotator",  "")
-    has_local   = bool(
-        last_crops and last_output
-        and Path(last_crops).exists()
-        and sorted(Path(last_crops).glob("*.png"))
-    )
+
+    # Only treat as valid if the folder actually exists and has PNGs on THIS machine
+    crops_ok  = bool(last_crops  and Path(last_crops).exists()
+                     and sorted(Path(last_crops).glob("*.png")))
+    output_ok = bool(last_output and Path(last_output).expanduser().parent.exists())
+    has_local = crops_ok and output_ok
+
+    # If config has stale paths (e.g. from another machine / old temp dirs),
+    # don't pre-fill the inputs with garbage
+    pre_crops  = last_crops  if crops_ok  else ""
+    pre_output = last_output if output_ok else ""
 
     _, col, _ = st.columns([1, 1.8, 1])
     with col:
@@ -786,7 +792,7 @@ def setup_page() -> None:
             '<div style="padding:28px 0 18px;text-align:center;">'
             '<div style="font-size:0.62rem;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#9ca3af;margin-bottom:8px;">Bean Quality Annotator</div>'
             '<div style="font-size:1.5rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Start a session</div>'
-            '<p style="font-size:0.84rem;color:#6b7280;margin:0;">Upload images directly, or point to a local folder.</p>'
+            '<p style="font-size:0.84rem;color:#6b7280;margin:0;">Enter your crops and output folder paths to begin.</p>'
             '</div>'
         )
 
@@ -796,20 +802,29 @@ def setup_page() -> None:
             total   = len(sorted(Path(last_crops).glob("*.png")))
             _html(
                 f'<div style="padding:10px 14px;background:#f0fdf4;border:1px solid #bbf7d0;'
-                f'border-radius:7px;margin-bottom:16px;">'
+                f'border-radius:7px;margin-bottom:12px;">'
                 f'<div style="font-size:0.68rem;font-weight:700;color:#16a34a;letter-spacing:0.06em;text-transform:uppercase;">Last session</div>'
                 f'<div style="font-size:0.8rem;color:#166534;margin-top:3px;word-break:break-all;">{last_crops}</div>'
                 f'<div style="font-size:0.72rem;color:#15803d;margin-top:2px;">{done} of {total} annotated</div>'
                 f'</div>'
             )
-            if st.button("Resume last session", type="primary", use_container_width=True):
-                if _try_start(last_crops, last_output, last_name):
+            rc, cc = st.columns([3, 1])
+            with rc:
+                if st.button("Resume last session", type="primary", use_container_width=True):
+                    if _try_start(last_crops, last_output, last_name):
+                        st.rerun()
+            with cc:
+                if st.button("Clear", use_container_width=True):
+                    try:
+                        CONFIG_FILE.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     st.rerun()
             st.markdown("<br>", unsafe_allow_html=True)
 
-        crops  = st.text_input("Crops folder",  value=last_crops,  placeholder="/path/to/png_crops")
-        output = st.text_input("Output folder", value=last_output, placeholder="/path/to/output")
-        name   = st.text_input("Annotator name", value=last_name,  placeholder="Optional")
+        crops  = st.text_input("Crops folder",  value=pre_crops,  placeholder="/path/to/png_crops")
+        output = st.text_input("Output folder", value=pre_output, placeholder="/path/to/output")
+        name   = st.text_input("Annotator name", value=last_name, placeholder="Optional")
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Start annotating", type="primary", use_container_width=True):
             if _try_start(crops, output, name):
