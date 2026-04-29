@@ -23,6 +23,26 @@ import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
 
 try:
+    import streamlit.elements.image as st_image
+    from streamlit.elements.lib.image_utils import image_to_url as _image_to_url
+    from streamlit.elements.lib.layout_utils import LayoutConfig
+
+    if not hasattr(st_image, "image_to_url"):
+        def image_to_url_compat(image, width, clamp, channels, output_format, image_id):
+            return _image_to_url(
+                image,
+                LayoutConfig(width=width),
+                clamp,
+                channels,
+                output_format,
+                image_id,
+            )
+
+        st_image.image_to_url = image_to_url_compat
+except Exception:
+    pass
+
+try:
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
     st_canvas = None
@@ -318,37 +338,24 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
     ch     = max(1, int(h0 * scale))
     bg     = img.resize((cw, ch), RESAMPLE)
 
-    bg_url = img_data_url(bg)
-
-    # Try background_url first (avoids Streamlit internal API issues).
-    # If the installed canvas version doesn't support it, fall back to background_image.
-    # If that also fails, show the image as a static preview and return empty.
-    result = None
+    # streamlit-drawable-canvas 0.9.3 still calls Streamlit's old image_to_url API.
+    # The module-level compatibility shim restores that API for newer Streamlit.
     try:
         result = st_canvas(
             fill_color="rgba(255,255,255,0.08)",
             stroke_width=2, stroke_color=stroke,
-            background_url=bg_url, update_streamlit=True,
+            background_image=bg, update_streamlit=True,
             height=ch, width=cw, drawing_mode=mode,
             point_display_radius=3, key=canvas_key,
         )
-    except TypeError:
-        try:
-            result = st_canvas(
-                fill_color="rgba(255,255,255,0.08)",
-                stroke_width=2, stroke_color=stroke,
-                background_image=bg, update_streamlit=True,
-                height=ch, width=cw, drawing_mode=mode,
-                point_display_radius=3, key=canvas_key,
-            )
-        except Exception as e:
-            st.image(bg, caption="Image preview — drawing unavailable")
-            st.warning(
-                f"The drawing canvas failed to load ({type(e).__name__}). "
-                "You can still rate the bean in Step 1. "
-                "Please report this error to the developer: **parimalnath321@gmail.com**"
-            )
-            return [], scale
+    except Exception as e:
+        st.image(bg, caption="Image preview — drawing unavailable")
+        st.warning(
+            f"The drawing canvas failed to load ({type(e).__name__}: {e}). "
+            "You can still rate the bean in Step 1. "
+            "Please report this error to the developer: **parimalnath321@gmail.com**"
+        )
+        return [], scale
 
     objects = []
     if result and result.json_data:
@@ -646,7 +653,7 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
         st.download_button("Download labels.csv", data=anns_csv(),
                            file_name="labels.csv", mime="text/csv",
                            use_container_width=True)
-        st.caption("Download regularly — refreshing clears your session.")
+        st.caption("Download regularly — annotations are not saved after refresh.")
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("Start over", use_container_width=True):
@@ -693,26 +700,43 @@ def setup_page() -> None:
                 return
 
             imgs: dict[str, bytes] = {}
+            skipped_images: list[str] = []
             for f in img_files:
                 mid = Path(f.name).stem
+                raw = f.getvalue()
                 try:
-                    Image.open(io.BytesIO(f.getvalue()))  # validate
-                    imgs[mid] = f.getvalue()
+                    with Image.open(io.BytesIO(raw)) as check:
+                        check.verify()
+                    imgs[mid] = raw
                 except Exception:
-                    st.warning(f"Skipped '{f.name}' — not a valid image.")
+                    skipped_images.append(f.name)
 
             if not imgs:
                 st.error("No valid images found in the selection.")
                 return
+            if skipped_images:
+                st.warning("Skipped invalid image file(s): " + ", ".join(skipped_images))
 
             prior: dict[str, dict] = {}
+            skipped_json: list[str] = []
+            unmatched_json: list[str] = []
             for f in (ann_files or []):
                 try:
                     data = json.loads(f.getvalue())
+                    if not isinstance(data, dict):
+                        raise ValueError("annotation JSON must be an object")
                     mid  = str(data.get("mask_id") or Path(f.name).stem)
+                    if mid not in imgs:
+                        unmatched_json.append(f.name)
+                        continue
                     prior[mid] = data
                 except Exception:
-                    pass
+                    skipped_json.append(f.name)
+
+            if skipped_json:
+                st.warning("Skipped invalid annotation JSON file(s): " + ", ".join(skipped_json))
+            if unmatched_json:
+                st.warning("Skipped annotation JSONs with no matching uploaded image: " + ", ".join(unmatched_json))
 
             st.session_state.update({
                 "imgs":      imgs,
