@@ -14,6 +14,7 @@ import base64
 import csv
 import io
 import json
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -301,6 +302,36 @@ def csv_bytes(files: list[Path], annotations: dict[str, dict[str, Any]]) -> byte
         mid = mask_id_of(p)
         w.writerow(_csv_row(mid, annotations.get(mid, blank_annotation(mid))))
     return buf.getvalue().encode("utf-8")
+
+
+def json_bytes(ann: dict[str, Any]) -> bytes:
+    """Convert annotation dict to JSON bytes."""
+    return json.dumps(ann, indent=2).encode("utf-8")
+
+
+def trigger_downloads(ann: dict[str, Any], files: list[Path], annotations: dict[str, dict[str, Any]], mid: str) -> None:
+    """Trigger automatic downloads for JSON and CSV files."""
+    # Download individual JSON annotation
+    json_data = json_bytes(ann)
+    st.download_button(
+        label="📥 Download JSON",
+        data=json_data,
+        file_name=f"{mid}_annotation.json",
+        mime="application/json",
+        key=f"dl_json_{mid}_{datetime.now().timestamp()}",
+        use_container_width=False,
+    )
+
+    # Download updated CSV with all annotations
+    csv_data = csv_bytes(files, annotations)
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv_data,
+        file_name="labels.csv",
+        mime="text/csv",
+        key=f"dl_csv_{mid}_{datetime.now().timestamp()}",
+        use_container_width=False,
+    )
 
 
 def img_data_url(img: Image.Image) -> str:
@@ -752,15 +783,58 @@ def setup_page() -> None:
         and sorted(Path(last_crops).glob("*.png"))
     )
 
+    # Handle ZIP file upload for Streamlit Cloud
+    upload_mode = False
+    if "upload_crops_zip" not in st.session_state:
+        st.session_state["upload_crops_zip"] = None
+
     _, col, _ = st.columns([1, 1.6, 1])
     with col:
         _html(
             '<div style="padding:32px 0 20px;text-align:center;">'
             '<div style="font-size:0.68rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:#9ca3af;margin-bottom:10px;">Bean Quality Annotator</div>'
             '<div style="font-size:1.4rem;font-weight:800;letter-spacing:-0.03em;color:#0f172a;margin:0 0 6px;">Configure session</div>'
-            '<p style="font-size:0.85rem;color:#6b7280;margin:0;">Set your crop folder and output path to begin.</p>'
+            '<p style="font-size:0.85rem;color:#6b7280;margin:0;">Upload crops or set local paths to begin.</p>'
             '</div>'
         )
+
+        # ── ZIP Upload Option ──
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("📦 Upload crops as ZIP (Recommended for cloud)", expanded=False):
+            st.caption("Upload a ZIP file containing your PNG crop images. Files will be extracted and ready to annotate.")
+            uploaded_zip = st.file_uploader("Choose ZIP file", type="zip", key="crops_zip_upload")
+            if uploaded_zip is not None:
+                try:
+                    # Create temporary directory for crops
+                    temp_crops_dir = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "")
+                    temp_crops_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Extract ZIP
+                    with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
+                        zip_ref.extractall(temp_crops_dir)
+
+                    # Find PNG files (handle nested folders)
+                    png_files = list(temp_crops_dir.rglob("*.png"))
+                    if not png_files:
+                        st.error("No PNG files found in ZIP")
+                    else:
+                        st.success(f"✓ Extracted {len(png_files)} PNG files")
+                        annotator_name = st.text_input("Your name (optional)", key="zip_annotator_name")
+                        if st.button("Start with uploaded crops", type="primary", use_container_width=True):
+                            # Create output dir
+                            output_dir = Path.home() / ".bean_annotator_temp" / uploaded_zip.name.replace(".zip", "") / "output"
+                            output_dir.mkdir(parents=True, exist_ok=True)
+
+                            save_config(str(temp_crops_dir), str(output_dir), annotator_name.strip())
+                            st.session_state.update({
+                                "crops_dir": str(temp_crops_dir),
+                                "output_dir": str(output_dir),
+                                "annotator": annotator_name.strip(),
+                                "ready": True
+                            })
+                            st.rerun()
+                except Exception as e:
+                    st.error(f"Error processing ZIP: {e}")
 
         # ── Resume banner ──
         if has_valid_config:
@@ -962,9 +1036,31 @@ def annotation_view() -> None:
             "annotator":          st.session_state.get("annotator", ""),
         }
         save_annotation(ann_dir, updated)
-        write_csv(csv_path, files, load_all(ann_dir))
+        updated_annotations = load_all(ann_dir)
+        write_csv(csv_path, files, updated_annotations)
         save_labeled_crop(img, mid, int(cur_sev), labeled_dir)
         st.toast(f"Saved — {mid} · Severity {cur_sev} ({SEVERITY[int(cur_sev)]['label']})")
+
+        # Show download buttons
+        st.info("📥 Downloads ready:")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                label="⬇️ JSON Annotation",
+                data=json_bytes(updated),
+                file_name=f"{mid}_annotation.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+        with col2:
+            st.download_button(
+                label="⬇️ All Labels (CSV)",
+                data=csv_bytes(files, updated_annotations),
+                file_name="labels.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
         if advance_to_next:
             st.session_state[idx_key] = min(cur + 1, total - 1)
             st.session_state["_switch_to_panel"] = "Inspect & Rate"
@@ -986,8 +1082,32 @@ def annotation_view() -> None:
                     "annotator":     st.session_state.get("annotator", ""),
                 })
                 save_annotation(ann_dir, updated)
-                write_csv(csv_path, files, load_all(ann_dir))
+                updated_annotations = load_all(ann_dir)
+                write_csv(csv_path, files, updated_annotations)
                 st.toast(f"Skipped — {mid}")
+
+                # Show download buttons
+                st.info("📥 Downloads ready:")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        label="⬇️ JSON Annotation",
+                        data=json_bytes(updated),
+                        file_name=f"{mid}_annotation.json",
+                        mime="application/json",
+                        use_container_width=True,
+                        key=f"skip_dl_json_{mid}",
+                    )
+                with col2:
+                    st.download_button(
+                        label="⬇️ All Labels (CSV)",
+                        data=csv_bytes(files, updated_annotations),
+                        file_name="labels.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=f"skip_dl_csv_{mid}",
+                    )
+
                 st.session_state[idx_key] = min(cur + 1, total - 1)
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
                 st.rerun()
