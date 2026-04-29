@@ -252,6 +252,15 @@ def project_bundle_bytes() -> bytes:
     return buf.getvalue()
 
 
+def project_bundle_filename() -> str:
+    order = st.session_state.get("img_order", [])
+    if not order:
+        return "annotations_bundle.zip"
+    if len(order) == 1:
+        return f"{order[0]}_annotations_bundle.zip"
+    return f"{order[0]}_to_{order[-1]}_{len(order)}_annotations_bundle.zip"
+
+
 def image_filename_of(mask_id: str) -> str:
     return f"{mask_id}.png"
 
@@ -844,7 +853,7 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
         # ── Downloads ──
         _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Export</div>')
         st.download_button("Download project bundle", data=project_bundle_bytes(),
-                           file_name="bean_annotations_bundle.zip", mime="application/zip",
+                           file_name=project_bundle_filename(), mime="application/zip",
                            use_container_width=True)
         st.caption("Download regularly — annotations are not saved after refresh.")
 

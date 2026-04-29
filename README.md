@@ -19,7 +19,7 @@ python3 -m pip install -r requirements.txt
 python3 -m streamlit run annotate_beans.py --server.port 8501
 ```
 
-Upload bean images from the start screen. When finished, download `bean_annotations_bundle.zip` from the sidebar.
+Upload bean images from the start screen. When finished, download the project bundle from the sidebar. The ZIP filename is based on the image stem, for example `0003_annotations_bundle.zip`.
 
 ## Deploy On Streamlit Community Cloud
 
@@ -38,10 +38,10 @@ The dependency file is next to the entrypoint, so Streamlit Cloud will install t
 
 ## Important Deployment Note
 
-The deployed app uses browser uploads and Streamlit session state. It does not use a database or persistent server storage. Refreshing the page or restarting the app clears the active session, so download `bean_annotations_bundle.zip` regularly.
+The deployed app uses browser uploads and Streamlit session state. It does not use a database or persistent server storage. Refreshing the page or restarting the app clears the active session, so download the project bundle regularly.
 
-To resume later, upload `bean_annotations_bundle.zip`. The bundle includes the images and the annotation details needed to continue.
+To resume later, upload the saved project bundle. The bundle includes the images and the annotation details needed to continue.
 
 ## Outputs
 
-- `bean_annotations_bundle.zip`: one ZIP containing `manifest.json`, `labels.csv`, `images/*.png`, and `annotations/*.json`
+- `<image_stem>_annotations_bundle.zip`: one ZIP containing `manifest.json`, `labels.csv`, `images/*.png`, and `annotations/*.json`
