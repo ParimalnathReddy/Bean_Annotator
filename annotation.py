@@ -13,6 +13,8 @@ import base64
 import csv
 import io
 import json
+import shutil
+import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +50,39 @@ try:
 except ImportError:
     drawable_canvas = None
     st_canvas = None
+
+
+def _patch_drawable_canvas_frontend() -> None:
+    """Allow data URL backgrounds in streamlit-drawable-canvas 0.9.3.
+
+    The bundled frontend prepends the Streamlit app origin to every background
+    URL. That works for /media/... URLs, but breaks data:image/... URLs, which
+    are the most reliable way to keep uploaded images visible on Streamlit Cloud.
+    """
+    if drawable_canvas is None:
+        return
+    try:
+        source_build = Path(drawable_canvas.__file__).parent / "frontend" / "build"
+        patched_build = Path(tempfile.gettempdir()) / "bean_annotator_drawable_canvas_build"
+        shutil.copytree(source_build, patched_build, dirs_exist_ok=True)
+
+        for js_path in (patched_build / "static" / "js").glob("main.*.js"):
+            src = js_path.read_text(encoding="utf-8")
+            old = "e.src=n+h"
+            new = 'e.src=h&&h.startsWith("data:")?h:n+h'
+            if old in src and new not in src:
+                js_path.write_text(src.replace(old, new), encoding="utf-8")
+            break
+
+        drawable_canvas._component_func = components.declare_component(
+            "st_canvas_patched",
+            path=str(patched_build),
+        )
+    except OSError:
+        pass
+
+
+_patch_drawable_canvas_frontend()
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
