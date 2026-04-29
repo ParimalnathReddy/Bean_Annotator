@@ -1065,6 +1065,11 @@ def annotation_view() -> None:
 
     elif panel == "Draw Defects":
         st.caption("Draw one closed polygon per defect. Fill in type and severity below the canvas.")
+        st.caption("Tool")
+        if hasattr(st, "segmented_control"):
+            st.segmented_control("Tool", ["polygon"], default="polygon", key=f"tool_{mid}", label_visibility="collapsed")
+        else:
+            st.radio("Tool", ["polygon"], index=0, horizontal=True, key=f"tool_{mid}", label_visibility="collapsed")
         mode = "polygon"
 
         objects, canvas_scale = draw_canvas(img, canvas_key=f"cv_{mid}", mode=mode, stroke=severity_color(cur_sev))
