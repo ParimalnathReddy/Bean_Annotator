@@ -25,7 +25,7 @@ import psycopg2.extras
 from dotenv import load_dotenv
 
 
-TARGET_USERNAME = "lovepreet1234"
+TARGET_USERNAME = "lovepreet123456"
 
 
 def db_config() -> dict:
