@@ -137,7 +137,8 @@ def list_images_for_job(job_id: str) -> list[str]:
 REPORT_KEY = "reports/assignment_report.csv"
 _REPORT_COLS = ["bean_id", "image_id", "filename", "s3_key", "batch_name",
                 "annotator_id", "annotator_name", "assigned_by_admin_id",
-                "assigned_by", "shuffle_rank", "shuffle_seed", "status",
+                "assigned_by", "shuffle_rank", "shuffle_seed",
+                "assignment_kind", "source_assignment_id", "status",
                 "assigned_at", "last_active_at"]
 
 

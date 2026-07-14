@@ -259,12 +259,12 @@ def register_and_assign_images(
             ]
             inserted = psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO assignments (image_id, annotator_id, assigned_by_admin)
+                """INSERT INTO assignments (image_id, annotator_id, assigned_by_admin, assignment_kind)
                    VALUES %s
-                   ON CONFLICT (image_id) DO NOTHING
+                   ON CONFLICT DO NOTHING
                    RETURNING id""",
                 assignment_values,
-                template="(%s, %s, %s)",
+                template="(%s, %s, %s, 'primary')",
                 fetch=True,
             )
             cur.execute(
@@ -441,11 +441,12 @@ def assign_images_to_annotator(image_ids: list[str], annotator_id: str, assigned
         with conn.cursor() as cur:
             rows = psycopg2.extras.execute_values(
                 cur,
-                """INSERT INTO assignments (image_id, annotator_id, assigned_by_admin)
+                """INSERT INTO assignments (image_id, annotator_id, assigned_by_admin, assignment_kind)
                    VALUES %s
-                   ON CONFLICT (image_id) DO NOTHING
+                   ON CONFLICT DO NOTHING
                    RETURNING id""",
                 [(iid, annotator_id, assigned_by_admin) for iid in image_ids],
+                template="(%s, %s, %s, 'primary')",
                 fetch=True,
             )
             return len(rows)
@@ -706,6 +707,8 @@ def get_full_assignment_report(admin_id: str | None = None) -> list[dict]:
                        adm.name                                     AS assigned_by,
                        so.shuffle_rank                              AS shuffle_rank,
                        so.shuffle_seed                              AS shuffle_seed,
+                       a.assignment_kind                            AS assignment_kind,
+                       a.source_assignment_id                       AS source_assignment_id,
                        a.status                                     AS status,
                        TO_CHAR(a.assigned_at,   'YYYY-MM-DD HH24:MI') AS assigned_at,
                        TO_CHAR(a.last_active_at,'YYYY-MM-DD HH24:MI') AS last_active_at
