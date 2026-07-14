@@ -100,30 +100,23 @@ DEFECT_TYPES = [
 ]
 
 SEVERITY = {
-    1: {"label": "Excellent", "color": "#16a34a", "fg": "#fff",
-        "desc": "Intact, clean, evenly colored. No defects. Highest quality grade."},
-    2: {"label": "Very Good", "color": "#65a30d", "fg": "#fff",
-        "desc": "Minor cosmetic variation only. No structural defect or contamination."},
-    3: {"label": "Moderate",  "color": "#d97706", "fg": "#fff",
-        "desc": "Limited visible flaw — small crack, spot, wrinkle, or mild discoloration."},
-    4: {"label": "Poor",      "color": "#ea580c", "fg": "#fff",
-        "desc": "Prominent damage, breakage, or discoloration. Likely downgraded or rejected."},
-    5: {"label": "Severe",    "color": "#dc2626", "fg": "#fff",
-        "desc": "Clearly unusable. Severe defect, mold, major breakage, or contamination."},
+    1: {"label": "No splits / cracks", "color": "#16a34a", "fg": "#fff",
+        "desc": "Bean has no splits or cracks."},
+    2: {"label": "Splits / cracks",    "color": "#dc2626", "fg": "#fff",
+        "desc": "Bean has visible splits or cracks."},
 }
 
 STEPS = [
     ("Inspect",       "Use the zoom viewer. Scroll to zoom, drag to pan, double-click to reset."),
-    ("Rate",          "Assign the overall severity from 1 (Excellent) to 5 (Severe)."),
+    ("Rate",          "Mark the bean as No splits / cracks or Splits / cracks."),
     ("Draw defects",  "Switch to Draw tab. Draw a polygon around each defect."),
-    ("Label defects", "For each shape select the defect type, severity, and add notes."),
-    ("Save",          "Click Save. Download the annotations ZIP from the sidebar regularly."),
+    ("Label defects", "For each shape select the defect type and add notes."),
+    ("Save",          "Click Save to record your annotation."),
 ]
 
 PANEL_STEPS = {
     "Inspect & Rate": {0, 1},
     "Draw Defects":   {2, 3},
-    "Saved JSON":     {4},
 }
 
 
@@ -139,10 +132,10 @@ h1 { font-size:1.2rem !important; font-weight:700 !important; letter-spacing:-0.
 h2 { font-size:1rem !important; font-weight:700 !important; color:#0f172a; }
 h3, h4 { font-size:0.88rem !important; font-weight:600 !important; color:#374151; }
 button { border-radius:5px !important; font-size:0.82rem !important; font-weight:500 !important; }
-button[kind="primary"] { background:#0f172a !important; border:1px solid #0f172a !important; color:#fff !important; font-weight:600 !important; }
-button[kind="primary"]:hover { background:#1e293b !important; }
-button[kind="secondary"] { background:#fff !important; border:1px solid #d1d5db !important; color:#374151 !important; }
-button[kind="secondary"]:hover { background:#f9fafb !important; }
+button[data-testid="baseButton-primary"] { background:#2563eb !important; border:1px solid #2563eb !important; color:#fff !important; font-weight:600 !important; }
+button[data-testid="baseButton-primary"]:hover { background:#1d4ed8 !important; border-color:#1d4ed8 !important; }
+button[data-testid="baseButton-secondary"] { background:#fff !important; border:1px solid #d1d5db !important; color:#374151 !important; }
+button[data-testid="baseButton-secondary"]:hover { background:#f9fafb !important; }
 .stTextInput label, .stTextArea label, .stSelectbox label,
 .stNumberInput label, .stRadio label span, .stCheckbox label span {
     font-size:0.78rem !important; font-weight:600 !important; color:#374151 !important;
@@ -220,7 +213,10 @@ def save_ann(ann: dict[str, Any]) -> None:
 
 
 def open_img(mask_id: str) -> Image.Image:
-    return Image.open(io.BytesIO(st.session_state["imgs"][mask_id])).convert("RGB")
+    raw = st.session_state.get("imgs", {}).get(mask_id)
+    if raw is None:
+        raise KeyError(f"Image not loaded for mask_id={mask_id!r}. Check S3 key.")
+    return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
 def project_bundle_bytes() -> bytes:
@@ -475,7 +471,40 @@ def zoom_viewer(img: Image.Image, key: str) -> None:
 
 # ── Drawing canvas ────────────────────────────────────────────────────────────
 
-def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tuple[list[dict], float]:
+def polygon_to_fabric(pts_img: list[dict], scale: float, stroke: str) -> dict:
+    """Convert a saved polygon (image coordinates) back to a Fabric.js polygon object."""
+    cxs = [p["x"] * scale for p in pts_img]
+    cys = [p["y"] * scale for p in pts_img]
+    min_x, min_y = min(cxs), min(cys)
+    return {
+        "type": "polygon",
+        "version": "4.4.0",
+        "originX": "left", "originY": "top",
+        "left": round(min_x, 2), "top": round(min_y, 2),
+        "width": round(max(cxs) - min_x, 2),
+        "height": round(max(cys) - min_y, 2),
+        "fill": "rgba(255,255,255,0.08)",
+        "stroke": stroke, "strokeWidth": 4,
+        "strokeLineCap": "butt", "strokeDashOffset": 0,
+        "strokeLineJoin": "miter", "strokeUniform": False,
+        "strokeMiterLimit": 4, "scaleX": 1, "scaleY": 1,
+        "angle": 0, "flipX": False, "flipY": False,
+        "opacity": 1, "shadow": None, "visible": True,
+        "backgroundColor": "", "fillRule": "nonzero",
+        "paintFirst": "fill", "globalCompositeOperation": "source-over",
+        "skewX": 0, "skewY": 0,
+        "points": [{"x": round(cx - min_x, 2), "y": round(cy - min_y, 2)}
+                   for cx, cy in zip(cxs, cys)],
+    }
+
+
+def draw_canvas(
+    img: Image.Image,
+    canvas_key: str,
+    mode: str,
+    stroke: str,
+    saved_defects: list[dict] | None = None,
+) -> tuple[list[dict], float]:
     if drawable_canvas is None or st_canvas is None:
         st.error("Install streamlit-drawable-canvas to use defect drawing.")
         st.code("pip install streamlit-drawable-canvas")
@@ -486,14 +515,25 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
     scale  = cw / w0 if w0 else 1.0
     ch     = max(1, int(h0 * scale))
     bg     = img.resize((cw, ch), RESAMPLE)
-
     bg_url = img_data_url(bg)
 
-    # Bypass streamlit-drawable-canvas' Python wrapper for the background image.
-    # Its wrapper uses Streamlit's internal media URL API, which can resolve to a
-    # blank background on Streamlit Cloud. The frontend accepts a data URL directly.
+    # ── Persistent canvas state ──────────────────────────────────────────────
+    # Cache raw Fabric.js objects in session state so polygons survive reruns.
+    # On a fresh load, seed the cache from saved defects so the user sees their
+    # previous work immediately without having to redraw.
+    cache_key = f"_canvas_{canvas_key}"
+    if cache_key not in st.session_state:
+        seed = []
+        for d in (saved_defects or []):
+            pts = d.get("polygon") or []
+            if len(pts) >= 3:
+                seed.append(polygon_to_fabric(pts, scale, stroke))
+        st.session_state[cache_key] = seed
+
+    cached_objects  = st.session_state[cache_key]
+    initial_drawing = {"version": "4.4.0", "background": "", "objects": cached_objects}
+
     try:
-        initial_drawing = {"version": "4.4.0", "background": ""}
         component_value = drawable_canvas._component_func(
             fillColor="rgba(255,255,255,0.08)",
             strokeWidth=4,
@@ -517,12 +557,515 @@ def draw_canvas(img: Image.Image, canvas_key: str, mode: str, stroke: str) -> tu
             "You can still rate the bean in Step 1. "
             "Please report this error to the developer: **parimalnath321@gmail.com**"
         )
-        return [], scale
+        return cached_objects, scale
 
-    objects = []
     if component_value and component_value.get("raw"):
-        objects = component_value["raw"].get("objects", []) or []
-    return objects, scale
+        raw = component_value["raw"].get("objects", []) or []
+        st.session_state[cache_key] = raw   # keep cache in sync
+        return raw, scale
+
+    # No new canvas event — return cached objects so the form stays populated
+    return cached_objects, scale
+
+
+# ── Professional HTML5 Canvas annotation tool ─────────────────────────────────
+
+def _canvas_html(bg_url: str, iw: int, ih: int, polys_json: str, stroke: str, placeholder: str) -> str:
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+  html,body{{width:100%;height:100%;overflow:hidden;background:#0d1117;
+    font-family:-apple-system,system-ui,sans-serif;user-select:none;-webkit-user-select:none}}
+  #wrap{{position:relative;width:100%;height:100vh}}
+  #cvs{{display:block;cursor:crosshair}}
+  #bar{{
+    position:absolute;top:8px;left:50%;transform:translateX(-50%);
+    display:flex;gap:5px;align-items:center;z-index:10;
+    background:rgba(13,17,23,0.93);padding:6px 10px;border-radius:8px;
+    border:1px solid rgba(255,255,255,0.12);white-space:nowrap
+  }}
+  .btn{{
+    padding:5px 10px;border:1px solid rgba(255,255,255,0.16);
+    background:rgba(255,255,255,0.07);color:#c9d1d9;
+    border-radius:5px;cursor:pointer;font-size:11.5px;font-weight:600;
+    transition:background .1s,border-color .1s;outline:none
+  }}
+  .btn:hover{{background:rgba(255,255,255,0.16);border-color:rgba(255,255,255,0.3)}}
+  .btn.on{{background:#1d4ed8;border-color:#3b82f6;color:#fff}}
+  .btn.green{{background:#15803d;border-color:#22c55e;color:#fff}}
+  .btn.green:hover{{background:#166534}}
+  .btn.danger{{background:rgba(185,28,28,0.3);border-color:#ef4444;color:#fca5a5}}
+  .btn.danger:hover{{background:rgba(185,28,28,0.5)}}
+  .sep{{width:1px;height:18px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0}}
+  #hint{{
+    position:absolute;bottom:8px;left:50%;transform:translateX(-50%);
+    background:rgba(13,17,23,0.82);color:#8b949e;padding:4px 12px;
+    border-radius:4px;font-size:10.5px;pointer-events:none;white-space:nowrap;z-index:10;
+    border:1px solid rgba(255,255,255,0.07)
+  }}
+  #pcnt{{
+    position:absolute;top:8px;right:8px;z-index:10;
+    background:rgba(13,17,23,0.82);color:#8b949e;padding:4px 10px;
+    border-radius:4px;font-size:10.5px;border:1px solid rgba(255,255,255,0.07)
+  }}
+  #zinfo{{
+    position:absolute;bottom:8px;right:8px;z-index:10;
+    background:rgba(13,17,23,0.82);color:#8b949e;padding:4px 8px;
+    border-radius:4px;font-size:10px;pointer-events:none;border:1px solid rgba(255,255,255,0.07)
+  }}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cvs"></canvas>
+  <div id="bar">
+    <button class="btn on" id="bdraw" title="D — draw mode">✏ Draw</button>
+    <button class="btn"    id="bedit" title="E — edit mode">⬡ Edit</button>
+    <div class="sep"></div>
+    <button class="btn" id="bundo" title="Ctrl+Z">↩ Undo</button>
+    <button class="btn" id="bredo" title="Ctrl+Y">↪ Redo</button>
+    <button class="btn danger" id="bclear" title="Clear all">✕ Clear</button>
+    <div class="sep"></div>
+    <button class="btn green" id="bconfirm" title="Ctrl+S — save polygons to annotation">✓ Confirm</button>
+  </div>
+  <div id="hint">Draw: click to add points · yellow = close · Enter/dbl-click=close · Esc=cancel · drag=pan · scroll=zoom</div>
+  <div id="pcnt">0 polygons</div>
+  <div id="zinfo">100%</div>
+</div>
+<script>
+(function(){{
+"use strict";
+
+// ── Config (injected from Python) ─────────────────────────────────────────────
+const SRC   = `{bg_url}`;
+const IW    = {iw};
+const IH    = {ih};
+const CLR   = `{stroke}`;
+const INIT  = {polys_json};
+const PHOLD = `{placeholder}`;
+const HIT   = 10;  // vertex hit-test radius (CSS px)
+
+function hex2rgba(h,a){{
+  const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);
+  return `rgba(${{r}},${{g}},${{b}},${{a}})`;
+}}
+const FILL_N = hex2rgba(CLR,.14), FILL_H = hex2rgba(CLR,.24);
+const FILL_S = 'rgba(59,130,246,.24)', CLR_S = '#60a5fa';
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let polys=[], cur=[], nxtId=0;
+let selP=-1, hovP=-1, dragV=null, dragPoly=null, wasDrag=false, mode='draw';
+let hist=[], redoSt=[];
+let zoom=1, ox=0, oy=0;
+let panning=false, px0=0, py0=0, ox0=0, oy0=0;
+let space=false, mouse=null;
+let drawPending=null;  // draw-mode mousedown awaiting click-vs-drag-pan decision
+const PAN_THRESH=5;    // CSS px of movement before a draw-mode press becomes a pan
+
+// ── Canvas / image ────────────────────────────────────────────────────────────
+const wrap=document.getElementById('wrap');
+const cvs=document.getElementById('cvs');
+const ctx=cvs.getContext('2d');
+const img=new Image();
+let imgOk=false;
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+function init(){{
+  doResize(); window.addEventListener('resize',doResize);
+  (INIT||[]).forEach(pts=>{{
+    if(Array.isArray(pts)&&pts.length>=3)
+      polys.push({{pts:pts.map(p=>({{x:+p.x,y:+p.y}})),id:nxtId++}});
+  }});
+  img.onload=()=>{{imgOk=true;fitView();render();}};
+  img.src=SRC;
+  cvs.addEventListener('mousedown',onDown);
+  cvs.addEventListener('mousemove',onMove);
+  cvs.addEventListener('mouseup',onUp);
+  cvs.addEventListener('dblclick',onDbl);
+  cvs.addEventListener('wheel',onWheel,{{passive:false}});
+  cvs.addEventListener('contextmenu',e=>e.preventDefault());
+  window.addEventListener('keydown',onKey);
+  window.addEventListener('keyup',e=>{{if(e.key===' '){{space=false;updCursor();}}}});
+  // Wire toolbar buttons inside the IIFE so functions are in scope
+  document.getElementById('bdraw').addEventListener('click',()=>setMode('draw'));
+  document.getElementById('bedit').addEventListener('click',()=>setMode('edit'));
+  document.getElementById('bundo').addEventListener('click',doUndo);
+  document.getElementById('bredo').addEventListener('click',doRedo);
+  document.getElementById('bclear').addEventListener('click',doClear);
+  document.getElementById('bconfirm').addEventListener('click',doConfirm);
+  updHint(); updCount();
+}}
+
+function doResize(){{
+  const dpr=window.devicePixelRatio||1,W=wrap.clientWidth,H=wrap.clientHeight;
+  cvs.width=W*dpr; cvs.height=H*dpr;
+  cvs.style.width=W+'px'; cvs.style.height=H+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  render();
+}}
+
+function fitView(){{
+  const W=cvs.clientWidth,H=cvs.clientHeight,m=48;
+  zoom=Math.min((W-m*2)/IW,(H-m*2)/IH,2);
+  ox=(W-IW*zoom)/2; oy=(H-IH*zoom)/2;
+  updZoom();
+}}
+
+// ── Coordinate helpers ────────────────────────────────────────────────────────
+function c2i(cx,cy){{return{{x:(cx-ox)/zoom,y:(cy-oy)/zoom}};}}
+function i2c(ix,iy){{return{{x:ix*zoom+ox,y:iy*zoom+oy}};}}
+function cR(){{return cvs.getBoundingClientRect();}}
+function dst(a,b){{return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2);}}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render(){{
+  const W=cvs.clientWidth,H=cvs.clientHeight;
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0d1117'; ctx.fillRect(0,0,W,H);
+  if(imgOk) ctx.drawImage(img,ox,oy,IW*zoom,IH*zoom);
+  polys.forEach((p,pi)=>drawPoly(p.pts,pi===selP,pi===hovP,mode==='edit'));
+  if(cur.length>0) drawCur();
+}}
+
+function drawPoly(pts,sel,hov,showV){{
+  if(!pts.length) return;
+  const cp=pts.map(p=>i2c(p.x,p.y));
+  ctx.beginPath(); ctx.moveTo(cp[0].x,cp[0].y);
+  for(let i=1;i<cp.length;i++) ctx.lineTo(cp[i].x,cp[i].y);
+  ctx.closePath();
+  ctx.fillStyle=sel?FILL_S:hov?FILL_H:FILL_N; ctx.fill();
+  ctx.strokeStyle=sel?CLR_S:CLR; ctx.lineWidth=sel?2.5:2;
+  ctx.setLineDash(sel?[7,3]:[]); ctx.stroke(); ctx.setLineDash([]);
+  if(!showV) return;
+  cp.forEach((c,vi)=>{{
+    const dg=dragV&&dragV.pi===(sel?selP:-99)&&dragV.vi===vi;
+    ctx.beginPath(); ctx.arc(c.x,c.y,dg?8:sel?6:5,0,Math.PI*2);
+    ctx.fillStyle=dg?'#fbbf24':sel?'#93c5fd':'#e5e7eb';
+    ctx.fill(); ctx.strokeStyle='#0d1117'; ctx.lineWidth=1.5; ctx.stroke();
+  }});
+}}
+
+function drawCur(){{
+  const cp=cur.map(p=>i2c(p.x,p.y));
+  if(cp.length>=3&&mouse){{
+    const mc=i2c(mouse.x,mouse.y);
+    ctx.beginPath(); ctx.moveTo(cp[0].x,cp[0].y);
+    for(let i=1;i<cp.length;i++) ctx.lineTo(cp[i].x,cp[i].y);
+    ctx.lineTo(mc.x,mc.y); ctx.closePath();
+    ctx.fillStyle=hex2rgba(CLR,.10); ctx.fill();
+  }}
+  if(cp.length>=2){{
+    ctx.beginPath(); ctx.moveTo(cp[0].x,cp[0].y);
+    for(let i=1;i<cp.length;i++) ctx.lineTo(cp[i].x,cp[i].y);
+    ctx.strokeStyle=CLR; ctx.lineWidth=2; ctx.setLineDash([]); ctx.stroke();
+  }}
+  if(mouse&&cp.length>=1){{
+    const mc=i2c(mouse.x,mouse.y);
+    ctx.beginPath(); ctx.moveTo(cp[cp.length-1].x,cp[cp.length-1].y); ctx.lineTo(mc.x,mc.y);
+    ctx.strokeStyle=hex2rgba(CLR,.5); ctx.lineWidth=1.5; ctx.setLineDash([5,4]); ctx.stroke(); ctx.setLineDash([]);
+  }}
+  cp.forEach((c,vi)=>{{
+    const isF=vi===0;
+    const canC=isF&&mouse&&cur.length>=3&&dst(i2c(mouse.x,mouse.y),c)<HIT;
+    ctx.beginPath(); ctx.arc(c.x,c.y,isF?(canC?11:8):5,0,Math.PI*2);
+    ctx.fillStyle=isF?(canC?'#4ade80':'#fbbf24'):'#e5e7eb';
+    ctx.fill(); ctx.strokeStyle=isF?'#166534':'#0d1117'; ctx.lineWidth=isF?2.5:1.5; ctx.stroke();
+  }});
+}}
+
+// ── Hit-testing (canvas-px) ───────────────────────────────────────────────────
+function hitV(cx,cy){{
+  for(let pi=polys.length-1;pi>=0;pi--){{
+    for(let vi=0;vi<polys[pi].pts.length;vi++){{
+      const c=i2c(polys[pi].pts[vi].x,polys[pi].pts[vi].y);
+      if(dst({{x:cx,y:cy}},c)<HIT) return{{pi,vi}};
+    }}
+  }}
+  return null;
+}}
+function hitP(ip){{
+  for(let pi=polys.length-1;pi>=0;pi--)
+    if(pip(ip,polys[pi].pts)) return pi;
+  return -1;
+}}
+function pip(pt,poly){{
+  let inside=false;
+  for(let i=0,j=poly.length-1;i<poly.length;j=i++){{
+    if(((poly[i].y>pt.y)!==(poly[j].y>pt.y))&&
+       pt.x<(poly[j].x-poly[i].x)*(pt.y-poly[i].y)/(poly[j].y-poly[i].y)+poly[i].x)
+      inside=!inside;
+  }}
+  return inside;
+}}
+function nearF(cx,cy){{
+  if(cur.length<3) return false;
+  return dst({{x:cx,y:cy}},i2c(cur[0].x,cur[0].y))<HIT;
+}}
+
+// ── Mouse events ──────────────────────────────────────────────────────────────
+function onDown(e){{
+  const R=cR(),cx=e.clientX-R.left,cy=e.clientY-R.top,ip=c2i(cx,cy);
+  if(e.button===1||(e.button===0&&space)){{
+    panning=true;px0=cx;py0=cy;ox0=ox;oy0=oy;
+    cvs.style.cursor='grabbing';e.preventDefault();return;
+  }}
+  if(e.button!==0) return;
+  if(mode==='draw'){{
+    // Defer click (place point / close) vs. drag-to-pan until onMove sees real movement.
+    drawPending={{cx,cy,ip,closing:nearF(cx,cy)}};
+  }}else{{
+    const vh=hitV(cx,cy);
+    if(vh){{selP=vh.pi;dragV=vh;dragPoly=null;wasDrag=false;}}
+    else{{
+      const ph=hitP(ip);
+      selP=ph;dragV=null;
+      dragPoly=(ph>=0)?{{pi:ph,lx:ip.x,ly:ip.y}}:null;
+      wasDrag=false;
+      if(ph<0){{
+        // Empty canvas in edit mode: drag pans, same as the rating panel — no Space needed.
+        panning=true;px0=cx;py0=cy;ox0=ox;oy0=oy;cvs.style.cursor='grabbing';
+      }}
+    }}
+    render();
+  }}
+}}
+
+function onMove(e){{
+  const R=cR(),cx=e.clientX-R.left,cy=e.clientY-R.top,ip=c2i(cx,cy);
+  mouse=ip;
+  if(drawPending){{
+    if(Math.abs(cx-drawPending.cx)>PAN_THRESH||Math.abs(cy-drawPending.cy)>PAN_THRESH){{
+      panning=true;px0=drawPending.cx;py0=drawPending.cy;ox0=ox;oy0=oy;
+      cvs.style.cursor='grabbing';drawPending=null;
+    }}else{{
+      return;
+    }}
+  }}
+  if(panning){{ox=ox0+(cx-px0);oy=oy0+(cy-py0);render();return;}}
+  if(dragV&&e.buttons===1){{
+    wasDrag=true;
+    polys[dragV.pi].pts[dragV.vi]={{x:Math.max(0,Math.min(IW,ip.x)),y:Math.max(0,Math.min(IH,ip.y))}};
+    render();return;
+  }}
+  if(dragPoly&&e.buttons===1){{
+    wasDrag=true;
+    const dx=ip.x-dragPoly.lx,dy=ip.y-dragPoly.ly;
+    polys[dragPoly.pi].pts=polys[dragPoly.pi].pts.map(p=>{{
+      return{{x:Math.max(0,Math.min(IW,p.x+dx)),y:Math.max(0,Math.min(IH,p.y+dy))}};
+    }});
+    dragPoly.lx=ip.x;dragPoly.ly=ip.y;
+    render();return;
+  }}
+  if(mode==='edit'){{
+    const vh=hitV(cx,cy),ph=vh?vh.pi:hitP(ip);
+    hovP=(ph!==-1&&ph!==selP)?ph:-1;
+    cvs.style.cursor=vh?'move':'grab';
+  }}
+  render();
+}}
+
+function onUp(){{
+  if(panning){{panning=false;updCursor();}}
+  if(drawPending){{
+    const dp=drawPending;drawPending=null;
+    if(dp.closing){{closePoly();}}
+    else{{
+      pushH();
+      cur.push({{x:Math.max(0,Math.min(IW,dp.ip.x)),y:Math.max(0,Math.min(IH,dp.ip.y))}});
+      render();updHint();
+    }}
+  }}
+  if((dragV||dragPoly)&&wasDrag){{pushH();wasDrag=false;}}
+  dragV=null;dragPoly=null;
+}}
+
+function onDbl(e){{
+  if(mode==='draw'&&cur.length>=3){{
+    cur.pop();  // remove duplicate point added by 2nd mousedown
+    if(cur.length>=3) closePoly();
+  }}
+}}
+
+function onWheel(e){{
+  e.preventDefault();
+  const R=cR(),mx=e.clientX-R.left,my=e.clientY-R.top;
+  const f=e.deltaY<0?1.12:0.88,prev=zoom;
+  zoom=Math.max(0.08,Math.min(zoom*f,20));
+  ox=mx-(mx-ox)*zoom/prev; oy=my-(my-oy)*zoom/prev;
+  render();updZoom();
+}}
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+function onKey(e){{
+  if(e.key===' '){{space=true;cvs.style.cursor='grab';e.preventDefault();return;}}
+  if(e.key==='Enter'&&mode==='draw'&&cur.length>=3){{closePoly();return;}}
+  if(e.key==='Escape'){{
+    if(cur.length){{cur=[];render();updHint();}}
+    else{{selP=-1;dragV=null;render();}}
+    return;
+  }}
+  if((e.ctrlKey||e.metaKey)&&!e.shiftKey&&e.key==='z'){{e.preventDefault();doUndo();return;}}
+  if((e.ctrlKey||e.metaKey)&&(e.key==='y'||(e.shiftKey&&e.key==='z'))){{e.preventDefault();doRedo();return;}}
+  if((e.ctrlKey||e.metaKey)&&e.key==='s'){{e.preventDefault();doConfirm();return;}}
+  if((e.key==='Delete'||e.key==='Backspace')&&mode==='edit'&&selP>=0){{
+    pushH();polys.splice(selP,1);selP=-1;render();updCount();return;
+  }}
+  if(e.key==='d'||e.key==='D') setMode('draw');
+  if(e.key==='e'||e.key==='E') setMode('edit');
+  if(e.key==='f'||e.key==='F'){{fitView();render();}}
+  if(e.key==='+'||e.key==='=') zoomBy(1.2);
+  if(e.key==='-') zoomBy(0.83);
+}}
+
+// ── Polygon ops ───────────────────────────────────────────────────────────────
+function closePoly(){{
+  if(cur.length<3) return;
+  pushH();polys.push({{pts:cur.slice(),id:nxtId++}});cur=[];
+  render();updHint();updCount();
+}}
+function doClear(){{
+  if(!polys.length&&!cur.length) return;
+  pushH();polys=[];cur=[];selP=-1;render();updCount();updHint();
+}}
+
+// ── Undo / redo ───────────────────────────────────────────────────────────────
+function snap(){{return JSON.stringify({{polys,cur}});}}
+function pushH(){{hist.push(snap());if(hist.length>50)hist.shift();redoSt=[];}}
+function doUndo(){{
+  if(!hist.length) return;
+  redoSt.push(snap());const s=JSON.parse(hist.pop());
+  polys=s.polys;cur=s.cur;selP=-1;dragV=null;render();updCount();updHint();
+}}
+function doRedo(){{
+  if(!redoSt.length) return;
+  hist.push(snap());const s=JSON.parse(redoSt.pop());
+  polys=s.polys;cur=s.cur;selP=-1;render();updCount();updHint();
+}}
+
+// ── Mode ──────────────────────────────────────────────────────────────────────
+function setMode(m){{
+  if(mode==='draw'&&m!=='draw'&&cur.length) cur=[];
+  mode=m;
+  document.getElementById('bdraw').classList.toggle('on',m==='draw');
+  document.getElementById('bedit').classList.toggle('on',m==='edit');
+  selP=-1;hovP=-1;dragV=null;dragPoly=null;updCursor();updHint();render();
+}}
+
+// ── Confirm → Streamlit ───────────────────────────────────────────────────────
+function doConfirm(){{
+  const data=JSON.stringify(polys.map(p=>p.pts));
+  try{{
+    const inp=window.parent.document.querySelector(`input[placeholder="${{PHOLD}}"]`);
+    if(!inp){{console.warn('Bean Annotator: confirm target not found');return;}}
+    const set=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;
+    set.call(inp,data);
+    inp.dispatchEvent(new window.parent.Event('input',{{bubbles:true}}));
+  }}catch(err){{console.error('Bean Annotator: confirm error',err);}}
+}}
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
+function zoomBy(f){{
+  const W=cvs.clientWidth/2,H=cvs.clientHeight/2,prev=zoom;
+  zoom=Math.max(0.08,Math.min(zoom*f,20));
+  ox=W-(W-ox)*zoom/prev;oy=H-(H-oy)*zoom/prev;render();updZoom();
+}}
+function updCursor(){{cvs.style.cursor=space?'grab':mode==='edit'?'grab':'crosshair';}}
+function updHint(){{
+  const el=document.getElementById('hint');
+  el.textContent=mode==='draw'
+    ?(cur.length===0
+      ?'Draw: click to place point · drag empty canvas to pan · D=draw  E=edit  F=fit  +/-=zoom  Ctrl+S=confirm'
+      :cur.length+' pts — click ● first point to close · Enter=close · Esc=cancel')
+    :'Edit: drag vertex/polygon to move it · drag empty canvas to pan · Delete=remove · Ctrl+S=confirm';
+}}
+function updCount(){{
+  document.getElementById('pcnt').textContent=polys.length+(polys.length===1?' polygon':' polygons');
+}}
+function updZoom(){{
+  document.getElementById('zinfo').textContent=Math.round(zoom*100)+'%';
+}}
+
+init();
+}})();
+</script>
+</body>
+</html>"""
+
+
+def draw_canvas_pro(
+    img: Image.Image,
+    canvas_key: str,
+    saved_defects: list[dict] | None = None,
+    stroke: str = "#dc2626",
+) -> list[dict]:
+    """
+    Professional polygon annotation canvas (HTML5 Canvas).
+    Features: draw/edit modes, vertex drag, zoom/pan, undo/redo, keyboard shortcuts.
+    Returns confirmed polygon defects in original image coordinates.
+    """
+    confirmed_key = f"_cvd_{canvas_key}"
+    result_key    = f"_cvr_{canvas_key}"
+
+    # Seed from saved defects if no confirmed state yet
+    if confirmed_key in st.session_state:
+        init_polys = st.session_state[confirmed_key]
+    else:
+        init_polys = [
+            d.get("polygon", [])
+            for d in (saved_defects or [])
+            if d.get("shape") == "polygon" and len(d.get("polygon") or []) >= 3
+        ]
+
+    # Downscale image for the canvas (saves bandwidth; IW/IH stay at original dims)
+    w0, h0 = img.size
+    max_w  = 1800
+    if w0 > max_w:
+        h_new = int(h0 * max_w / w0)
+        canvas_img = img.resize((max_w, h_new), Image.LANCZOS)
+    else:
+        canvas_img = img
+    bg_url = img_data_url(canvas_img)
+
+    placeholder  = f"__cvs_{canvas_key}__"
+    polys_json   = json.dumps(init_polys)
+
+    # Hidden text input — CSS hides it; JS writes polygon JSON to it on Confirm
+    st.markdown(
+        f'<style>[data-testid="stTextInput"]:has(input[placeholder="{placeholder}"])'
+        f'{{display:none!important;height:0!important;overflow:hidden!important;margin:0!important}}</style>',
+        unsafe_allow_html=True,
+    )
+    raw = st.text_input("cvs", key=result_key, placeholder=placeholder, label_visibility="collapsed")
+
+    # Process newly confirmed polygon data sent from the canvas JS
+    if raw and raw.strip() not in ("", "[]", "null"):
+        try:
+            confirmed = json.loads(raw)
+            if isinstance(confirmed, list):
+                st.session_state[confirmed_key] = confirmed
+        except Exception:
+            pass
+
+    components.html(
+        _canvas_html(bg_url, w0, h0, polys_json, stroke, placeholder),
+        height=640,
+        scrolling=False,
+    )
+
+    # Build and return the current defect list
+    current_polys = st.session_state.get(confirmed_key, init_polys)
+    result: list[dict] = []
+    for pts in current_polys:
+        if isinstance(pts, list) and len(pts) >= 3:
+            result.append({
+                "shape":   "polygon",
+                "polygon": [{"x": float(p["x"]), "y": float(p["y"])} for p in pts],
+                "closed":  True,
+            })
+    return result
 
 
 def fabric_to_shape(obj: dict[str, Any], scale: float) -> dict[str, Any] | None:
@@ -621,39 +1164,39 @@ def filter_shapes(objects: list[dict], scale: float) -> list[dict]:
 # ── UI components ─────────────────────────────────────────────────────────────
 
 def severity_selector(current: int | None, key: str) -> int:
-    default  = current if current in SEVERITY else 3
+    default  = current if current in SEVERITY else 1
     selected = st.radio(
-        "Severity",
-        options=list(SEVERITY.keys()),
-        index=list(SEVERITY.keys()).index(default),
+        "Rating",
+        options=[1, 2],
+        index=0 if default == 1 else 1,
         horizontal=True,
-        format_func=lambda v: f"{v} — {SEVERITY[v]['label']}",
+        format_func=lambda v: SEVERITY[v]["label"],
         key=key,
         label_visibility="collapsed",
     )
     selected = int(selected)
 
-    cols = st.columns(5)
-    for level, col in zip(SEVERITY.keys(), cols):
+    col1, col2 = st.columns(2)
+    for level, col in zip([1, 2], [col1, col2]):
         meta   = SEVERITY[level]
         is_sel = level == selected
-        border  = f"2px solid {meta['color']}" if is_sel else "2px solid transparent"
-        opacity = "1" if is_sel else "0.5"
-        ring    = f"box-shadow:0 0 0 3px {meta['color']}40;" if is_sel else ""
+        border = f"3px solid {meta['color']}" if is_sel else "3px solid #e5e7eb"
+        ring   = f"box-shadow:0 0 0 4px {meta['color']}30;" if is_sel else ""
+        bg     = meta["color"] if is_sel else "#f9fafb"
+        fg     = meta["fg"] if is_sel else "#9ca3af"
         _col_html(col,
-            f'<div style="padding:10px 4px;border-radius:5px;border:{border};background:{meta["color"]};'
-            f'color:{meta["fg"]};text-align:center;opacity:{opacity};{ring}">'
-            f'<div style="font-size:1.1rem;font-weight:800;line-height:1;">{level}</div>'
-            f'<div style="font-size:0.62rem;font-weight:600;margin-top:4px;opacity:0.9;">{meta["label"]}</div>'
+            f'<div style="padding:22px 8px;border-radius:8px;border:{border};'
+            f'background:{bg};color:{fg};text-align:center;{ring};cursor:pointer;">'
+            f'<div style="font-size:1.6rem;font-weight:900;line-height:1;">{meta["label"]}</div>'
             f'</div>'
         )
 
     meta = SEVERITY[selected]
     _html(
-        f'<div style="margin-top:8px;padding:9px 13px;border-radius:5px;'
+        f'<div style="margin-top:10px;padding:9px 13px;border-radius:5px;'
         f'background:{meta["color"]}14;border-left:3px solid {meta["color"]};'
         f'font-size:0.82rem;color:#374151;line-height:1.5;">'
-        f'<strong style="color:{meta["color"]};">Level {selected} — {meta["label"]}.</strong> {meta["desc"]}'
+        f'<strong style="color:{meta["color"]};">{meta["label"]}.</strong> {meta["desc"]}'
         f'</div>'
     )
     return selected
@@ -699,8 +1242,9 @@ def existing_defects_table(ann: dict[str, Any]) -> None:
         st.caption("No defects saved yet.")
         return
     rows = [
-        {"#": i, "type": d.get("custom_name") or d.get("type", ""),
-         "severity": d.get("severity", ""), "shape": d.get("shape", ""), "notes": d.get("notes", "")}
+        {"#": i, "shape": d.get("shape", ""),
+         "x": round(d.get("bbox", {}).get("x", 0)),
+         "y": round(d.get("bbox", {}).get("y", 0))}
         for i, d in enumerate(defects, 1)
     ]
     st.dataframe(rows, use_container_width=True, hide_index=True)
@@ -709,39 +1253,18 @@ def existing_defects_table(ann: dict[str, Any]) -> None:
 def defect_form(shapes: list[dict], prefix: str) -> list[dict[str, Any]]:
     defects = []
     for idx, shape in enumerate(shapes, 1):
-        bbox = shape.get("bbox", {})
-        loc  = f"x {bbox.get('x',0):.0f}, y {bbox.get('y',0):.0f}" if bbox else ""
+        bbox     = shape.get("bbox", {})
+        loc      = f"x {bbox.get('x',0):.0f}, y {bbox.get('y',0):.0f}" if bbox else ""
         loc_span = f'&nbsp;&nbsp;<span style="color:#9ca3af;">{loc}</span>' if loc else ""
         _html(
-            f'<div style="padding:10px 13px;border-radius:5px;border:1px solid #e5e7eb;background:#f9fafb;margin:8px 0;">'
+            f'<div style="padding:10px 13px;border-radius:5px;border:1px solid #e5e7eb;'
+            f'background:#f9fafb;margin:8px 0;">'
             f'<span style="font-size:0.75rem;font-weight:600;color:#374151;">'
             f'Shape {idx} &ndash; {shape.get("shape","").upper()}{loc_span}</span></div>'
         )
         if not st.checkbox("Include", value=True, key=f"{prefix}_inc_{idx}"):
             continue
-
-        c1, c2, c3 = st.columns([1.4, 1, 1.3])
-        dtype = c1.selectbox("Type", DEFECT_TYPES, key=f"{prefix}_type_{idx}")
-        dsev  = c2.selectbox("Severity", list(SEVERITY.keys()), index=2,
-                             format_func=lambda v: f"{v} — {SEVERITY[v]['label']}",
-                             key=f"{prefix}_sev_{idx}")
-        if dtype == "Other":
-            custom = c3.text_input("Name", key=f"{prefix}_custom_{idx}")
-        else:
-            meta   = SEVERITY[dsev]
-            _col_html(c3,
-                f'<div style="margin-top:24px;padding:6px 9px;border-radius:4px;'
-                f'border-left:3px solid {meta["color"]};background:{meta["color"]}14;'
-                f'font-size:0.75rem;font-weight:500;color:#374151;">'
-                f'{meta["label"]}: {meta["desc"][:60]}…</div>'
-            )
-            custom = ""
-
-        notes = st.text_input("Notes", key=f"{prefix}_notes_{idx}",
-                              placeholder="Optional — e.g. 'near tip', '3 mm crack'")
-        entry: dict[str, Any] = {"type": dtype, "severity": int(dsev), "notes": notes.strip()}
-        if custom.strip():
-            entry["custom_name"] = custom.strip()
+        entry: dict[str, Any] = {}
         entry.update(shape)
         defects.append(entry)
     return defects
@@ -781,7 +1304,6 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
         step_defs = [
             ("Inspect & Rate", "Inspect & Rate", "Rate overall severity",   has_sev or is_skip),
             ("Draw Defects",   "Draw Defects",   "Mark individual defects", has_def or is_skip),
-            ("Saved JSON",     "Review JSON",     "Inspect saved record",    False),
         ]
 
         _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Steps</div>')
@@ -847,21 +1369,6 @@ def sidebar(files: list[Path], current_mid: str = "") -> str:
                 f'</div></div>'
             )
         _html("".join(sev_parts))
-
-        _html('<div style="height:1px;background:#e2e8f0;margin:16px 0;"></div>')
-
-        # ── Downloads ──
-        _html('<div style="font-size:0.6rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin-bottom:8px;">Export</div>')
-        st.download_button("Download project bundle", data=project_bundle_bytes(),
-                           file_name=project_bundle_filename(), mime="application/zip",
-                           use_container_width=True)
-        st.caption("Download regularly — annotations are not saved after refresh.")
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Start over", use_container_width=True):
-            for key in ["imgs", "img_order", "anns", "annotator", "ready", "workflow_panel"]:
-                st.session_state.pop(key, None)
-            st.rerun()
 
     return panel
 
@@ -980,7 +1487,8 @@ def annotation_view() -> None:
         st.rerun()
         return
 
-    sev       = ann.get("overall_severity")
+    _raw_sev  = ann.get("overall_severity")
+    sev       = _raw_sev if _raw_sev in SEVERITY else (1 if _raw_sev else None)
     skipped   = ann.get("skip", {}).get("skipped")
     completed = sum(1 for p in files if is_done(annotations.get(mask_id_of(p), blank_annotation(mask_id_of(p)))))
     pct       = round(100 * completed / total) if total else 0
@@ -1035,125 +1543,182 @@ def annotation_view() -> None:
         st.session_state[idx_key] = next_unfinished(files, all_anns(), cur + 1)
         st.rerun()
 
+    last_rated = st.session_state.get("_last_rated")
+    if last_rated and last_rated["idx"] != cur:
+        u_col1, u_col2 = st.columns([3, 1])
+        with u_col1:
+            st.info(f"Last rated **{last_rated['label']}** — bean {last_rated['idx'] + 1}.")
+        with u_col2:
+            if st.button("↶ Undo & fix", use_container_width=True, key="undo_last_rated"):
+                st.session_state[idx_key] = last_rated["idx"]
+                st.session_state["_switch_to_panel"] = "Inspect & Rate"
+                st.session_state.pop("_last_rated", None)
+                st.rerun()
+
     st.divider()
 
     # ── Widget state init ──
     sev_key   = f"sev_{mid}"
-    notes_key = f"notes_{mid}"
     if sev_key not in st.session_state:
-        st.session_state[sev_key]   = sev if sev in SEVERITY else 3
-    if notes_key not in st.session_state:
-        st.session_state[notes_key] = ann.get("overall_notes", "")
+        st.session_state[sev_key] = sev if sev in SEVERITY else 1
 
-    cur_sev   = int(st.session_state.get(sev_key, 3))
-    cur_notes = str(st.session_state.get(notes_key, ""))
-    defects   = ann.get("defects", []) or []
+    cur_sev   = int(st.session_state.get(sev_key, 1))
+
+    # Prefer canvas-confirmed polygons over the stale DB copy when available
+    _canvas_confirmed = st.session_state.get(f"_cvd_cv_{mid}")
+    if _canvas_confirmed is not None:
+        defects = []
+        for _pts in _canvas_confirmed:
+            if isinstance(_pts, list) and len(_pts) >= 3:
+                defects.append({
+                    "shape": "polygon",
+                    "polygon": [{"x": float(p["x"]), "y": float(p["y"])} for p in _pts],
+                    "closed": True,
+                })
+    else:
+        defects = ann.get("defects", []) or []
 
     guide_panel(panel)
     guidelines_panel()
     st.divider()
 
-    # ── Active panel ──
-    if panel == "Inspect & Rate":
-        zoom_viewer(add_border(img, sev) if sev else img, key=mid)
-        st.divider()
-        st.caption("Overall severity")
-        cur_sev = severity_selector(cur_sev, key=sev_key)
-        st.caption("Notes")
-        cur_notes = st.text_area("Notes", placeholder="Optional observations about overall bean quality.",
-                                 key=notes_key, height=80, label_visibility="collapsed")
+    # ── Inner helpers (defined before panel so rating buttons can call them) ──
 
-    elif panel == "Draw Defects":
-        st.caption("Draw one closed polygon per defect. Fill in type and severity below the canvas.")
-        st.caption("Tool")
-        if hasattr(st, "segmented_control"):
-            st.segmented_control("Tool", ["polygon"], default="polygon", key=f"tool_{mid}", label_visibility="collapsed")
-        else:
-            st.radio("Tool", ["polygon"], index=0, horizontal=True, key=f"tool_{mid}", label_visibility="collapsed")
-        mode = "polygon"
-
-        objects, canvas_scale = draw_canvas(img, canvas_key=f"cv_{mid}", mode=mode, stroke=severity_color(cur_sev))
-
-        if objects:
-            shapes  = filter_shapes(objects, canvas_scale)
-            ignored = len(objects) - len(shapes)
-            n_s     = len(shapes)
-            st.caption(f"{n_s} shape{'s' if n_s != 1 else ''} detected{f' — {ignored} ignored (too small)' if ignored else ''}")
-            defects = defect_form(shapes, prefix=f"d_{mid}")
-        else:
-            defects = ann.get("defects", []) or []
-            st.caption("No shapes drawn. Existing defects will be preserved on save.")
-
-        with st.expander(f"Saved defects ({len(ann.get('defects', []) or [])})"):
-            existing_defects_table(ann)
-
-    else:
-        st.caption("Annotation record")
-        if ann.get("timestamp"):
-            st.caption(f"Last saved: {ann['timestamp']}")
-        st.json(ann)
-
-    # ── Actions ──
-    st.divider()
-
-    def _do_save(advance_to_next: bool) -> None:
+    def _do_save(advance_to_next: bool, severity: int | None = None) -> None:
+        sev = severity if severity is not None else int(cur_sev)
+        st.session_state[sev_key] = sev
         updated = {
             "annotation_version": ANNOTATION_VER,
             "mask_id":            mid,
             "image_stem":         mid,
             "image_filename":     image_filename_of(mid),
-            "overall_severity":   int(cur_sev),
-            "overall_notes":      cur_notes.strip(),
+            "overall_severity":   sev,
+            "overall_notes":      ann.get("overall_notes", ""),
             "defects":            [normalize_defect_geometry(d) for d in defects],
             "skip":               {"skipped": False, "reason": ""},
             "timestamp":          utc_now(),
             "annotator":          st.session_state.get("annotator", ""),
         }
         save_ann(updated)
-        st.toast(f"Saved — {mid} · Severity {cur_sev} ({SEVERITY[int(cur_sev)]['label']})")
+        label = SEVERITY.get(sev, {}).get("label", sev)
+        st.toast(f"Saved — {label}")
         if advance_to_next:
+            st.session_state["_last_rated"] = {"idx": cur, "mid": mid, "label": label}
             st.session_state[idx_key] = min(cur + 1, total - 1)
             st.session_state["_switch_to_panel"] = "Inspect & Rate"
+            st.session_state.pop(f"_canvas_cv_{mid}", None)
+            st.session_state.pop(f"_cvd_cv_{mid}", None)
 
-    def _skip_widget() -> None:
-        with st.expander("Skip"):
-            skip_reason = st.text_input("Reason", key=f"skipreason_{mid}",
-                                        placeholder="Blurred, duplicate, unclear...",
-                                        label_visibility="collapsed")
-            st.caption("Skip when the image cannot be reliably annotated.")
-            if st.button("Confirm skip", use_container_width=True):
-                updated = blank_annotation(mid)
-                updated.update({
-                    "image_stem":     mid,
-                    "image_filename": image_filename_of(mid),
-                    "overall_notes": cur_notes.strip(),
-                    "defects":       [normalize_defect_geometry(d) for d in (ann.get("defects", []) or [])],
-                    "skip":          {"skipped": True, "reason": skip_reason.strip() or "No reason given"},
-                    "timestamp":     utc_now(),
-                    "annotator":     st.session_state.get("annotator", ""),
-                })
-                save_ann(updated)
-                st.toast(f"Skipped — {mid}")
-                st.session_state[idx_key] = min(cur + 1, total - 1)
-                st.session_state["_switch_to_panel"] = "Inspect & Rate"
-                st.rerun()
+    def _do_skip(reason: str = "skipped") -> None:
+        updated = {
+            "annotation_version": ANNOTATION_VER,
+            "mask_id":            mid,
+            "image_stem":         mid,
+            "image_filename":     image_filename_of(mid),
+            "overall_severity":   None,
+            "overall_notes":      ann.get("overall_notes", ""),
+            "defects":            [],
+            "skip":               {"skipped": True, "reason": reason},
+            "timestamp":          utc_now(),
+            "annotator":          st.session_state.get("annotator", ""),
+        }
+        save_ann(updated)
+        st.toast("Skipped — moving to next image")
+        st.session_state["_last_rated"] = {"idx": cur, "mid": mid, "label": "Skip"}
+        st.session_state[idx_key] = min(cur + 1, total - 1)
+        st.session_state["_switch_to_panel"] = "Inspect & Rate"
+        st.session_state.pop(f"_canvas_cv_{mid}", None)
+        st.session_state.pop(f"_cvd_cv_{mid}", None)
 
+    # ── Active panel ──
     if panel == "Inspect & Rate":
-        s_col, n_col, skip_col = st.columns([1.2, 1.2, 1])
+        zoom_viewer(add_border(img, sev) if sev else img, key=mid)
+        st.divider()
+
+        # ── Rating banners ──
+        _html('<div style="margin-bottom:8px;font-size:0.75rem;font-weight:700;color:#374151;'
+              'letter-spacing:0.06em;text-transform:uppercase;">Quality Rating</div>')
+
+        g_col, b_col, s_col = st.columns(3)
+        with g_col:
+            good_clicked = st.button("No splits / cracks", key=f"rate_good_{mid}", use_container_width=True)
+        with b_col:
+            bad_clicked  = st.button("Splits / cracks",    key=f"rate_bad_{mid}",  use_container_width=True)
         with s_col:
-            if st.button("Save", type="primary", use_container_width=True):
-                _do_save(advance_to_next=False)
-                st.rerun()
-        with n_col:
-            if st.button("Next Step →", use_container_width=True):
-                _do_save(advance_to_next=False)
-                st.session_state["_switch_to_panel"] = "Draw Defects"
-                st.rerun()
-        with skip_col:
-            _skip_widget()
+            skip_clicked = st.button("Skip", key=f"rate_skip_{mid}", use_container_width=True)
+
+        # Style the buttons green/red/orange via JS.
+        # MutationObserver re-applies styles after every Streamlit DOM update.
+        components.html("""
+<script>
+(function(){
+  var S = {
+    "No splits / cracks": "background:#16a34a!important;color:#fff!important;border:none!important;font-size:1.4rem!important;font-weight:900!important;min-height:68px!important;border-radius:8px!important;width:100%!important;cursor:pointer!important;",
+    "Splits / cracks":    "background:#dc2626!important;color:#fff!important;border:none!important;font-size:1.4rem!important;font-weight:900!important;min-height:68px!important;border-radius:8px!important;width:100%!important;cursor:pointer!important;",
+    "Skip": "background:#d97706!important;color:#fff!important;border:none!important;font-size:1.4rem!important;font-weight:900!important;min-height:68px!important;border-radius:8px!important;width:100%!important;cursor:pointer!important;"
+  };
+  function apply(){
+    window.parent.document.querySelectorAll('[data-testid="stButton"] button').forEach(function(b){
+      var t = b.textContent.trim();
+      if(S[t]) b.style.cssText = S[t];
+    });
+  }
+  apply();
+  setTimeout(apply, 150);
+  setTimeout(apply, 600);
+  new MutationObserver(apply).observe(window.parent.document.body, {childList:true, subtree:true});
+})();
+</script>
+""", height=0)
+
+        if good_clicked:
+            _do_save(advance_to_next=True, severity=1)
+            st.rerun()
+        if bad_clicked:
+            # Save severity=Bad then send to defect drawing, don't advance yet
+            _do_save(advance_to_next=False, severity=2)
+            st.session_state["_switch_to_panel"] = "Draw Defects"
+            st.rerun()
+        if skip_clicked:
+            _do_skip()
+            st.rerun()
+
+        if sev:
+            meta = SEVERITY.get(sev, {})
+            _html(
+                f'<div style="margin-top:10px;padding:9px 13px;border-radius:6px;'
+                f'background:{meta.get("color","#eee")}18;border-left:3px solid {meta.get("color","#eee")};'
+                f'font-size:0.82rem;color:#374151;">'
+                f'Last saved: <strong style="color:{meta.get("color","#374151")};">{meta.get("label","")}</strong>'
+                f'</div>'
+            )
+
 
     elif panel == "Draw Defects":
-        p_col, s_col, skip_col = st.columns([1.2, 1.2, 1])
+        defects = draw_canvas_pro(
+            img,
+            canvas_key=f"cv_{mid}",
+            saved_defects=ann.get("defects") or [],
+            stroke=severity_color(cur_sev),
+        )
+        n_d = len(defects)
+        if n_d:
+            st.caption(
+                f"{n_d} polygon{'s' if n_d != 1 else ''} confirmed · "
+                "draw more or edit, then click **✓ Confirm** in the canvas · "
+                "click **Save** below to write to database"
+            )
+        else:
+            st.caption(
+                "No polygons yet. Draw in the canvas above, "
+                "then click **✓ Confirm** — then **Save**."
+            )
+
+    # ── Actions ──
+    st.divider()
+
+    if panel == "Draw Defects":
+        p_col, s_col = st.columns([1.2, 1.2])
         with p_col:
             if st.button("← Previous Step", use_container_width=True):
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
@@ -1162,22 +1727,9 @@ def annotation_view() -> None:
             if st.button("Save", type="primary", use_container_width=True):
                 _do_save(advance_to_next=True)
                 st.rerun()
-        with skip_col:
-            _skip_widget()
-
-    else:
-        s_col, b_col = st.columns([1.2, 1])
-        with s_col:
-            if st.button("Save", type="primary", use_container_width=True):
-                _do_save(advance_to_next=True)
-                st.rerun()
-        with b_col:
-            if st.button("← Back to Step 1", use_container_width=True):
-                st.session_state["_switch_to_panel"] = "Inspect & Rate"
-                st.rerun()
 
     if completed == total:
-        st.success("All beans annotated or skipped. Download the project bundle from the sidebar.")
+        st.success("All beans annotated or skipped.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

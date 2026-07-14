@@ -2,4 +2,12 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .streamlit/secrets.toml
-
+.env
+.env.*
+.venv/
+venv/
+*.pem
+*.key
+assets/
+RAW_Images/
+backups/
