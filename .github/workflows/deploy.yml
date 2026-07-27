@@ -20,9 +20,19 @@ jobs:
           script: |
             cd /opt/bean-annotator
             git pull origin main
-            source .venv/bin/activate
+            if [ -d "venv" ]; then
+              source venv/bin/activate
+              VENV_PYTHON="venv/bin/python"
+            elif [ -d ".venv" ]; then
+              source .venv/bin/activate
+              VENV_PYTHON=".venv/bin/python"
+            else
+              python3 -m venv venv
+              source venv/bin/activate
+              VENV_PYTHON="venv/bin/python"
+            fi
             pip install -r requirements.txt --quiet
             mkdir -p logs
-            (crontab -l 2>/dev/null | grep -v 'assign_skipped_redo_to_lovepreet.py' || true; echo '0 2 * * * cd /opt/bean-annotator && .venv/bin/python scripts/assign_skipped_redo_to_lovepreet.py --execute >> logs/skipped_redo_lovepreet.log 2>&1') | crontab -
+            (crontab -l 2>/dev/null | grep -v 'assign_skipped_redo_to_lovepreet.py' || true; echo "0 2 * * * cd /opt/bean-annotator && $VENV_PYTHON scripts/assign_skipped_redo_to_lovepreet.py --execute >> logs/skipped_redo_lovepreet.log 2>&1") | crontab -
             sudo systemctl restart bean-annotator bean-admin
             echo "Deploy complete: $(date)"
