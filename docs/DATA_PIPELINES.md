@@ -137,7 +137,7 @@ Nightly schedule:
 Each run also appends a structured CSV audit row to:
 
 ```text
-logs/skipped_redo_lovepreet_runs.csv
+scripts/skipped_redo_lovepreet_runs.csv
 ```
 
 CSV columns:

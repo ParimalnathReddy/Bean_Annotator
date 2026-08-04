@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 
 
 TARGET_USERNAME = "lovepreet123456"
-DEFAULT_AUDIT_CSV = "logs/skipped_redo_lovepreet_runs.csv"
+DEFAULT_AUDIT_CSV = Path(__file__).with_name("skipped_redo_lovepreet_runs.csv")
 AUDIT_COLUMNS = [
     "run_started_at_utc",
     "mode",
