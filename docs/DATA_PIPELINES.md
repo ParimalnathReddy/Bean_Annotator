@@ -134,9 +134,23 @@ Nightly schedule:
 0 2 * * * cd /opt/bean-annotator && <venv-python> scripts/assign_skipped_redo_to_lovepreet.py --execute >> logs/skipped_redo_lovepreet.log 2>&1
 ```
 
+Each run also appends a structured CSV audit row to:
+
+```text
+logs/skipped_redo_lovepreet_runs.csv
+```
+
+CSV columns:
+
+- `run_started_at_utc`
+- `mode`
+- `target_username`
+- `candidate_count`
+- `assigned_count`
+- `by_original_annotator_json`
+
 Design rule:
 
 - Original skipped assignments are not modified.
 - Redo work is tracked as separate assignments linked to the original skipped
   assignment.
-

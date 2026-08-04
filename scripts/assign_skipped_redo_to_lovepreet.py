@@ -17,8 +17,11 @@ Execute:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import os
 from pathlib import Path
+from datetime import datetime, timezone
 
 import psycopg2
 import psycopg2.extras
@@ -26,6 +29,15 @@ from dotenv import load_dotenv
 
 
 TARGET_USERNAME = "lovepreet123456"
+DEFAULT_AUDIT_CSV = "logs/skipped_redo_lovepreet_runs.csv"
+AUDIT_COLUMNS = [
+    "run_started_at_utc",
+    "mode",
+    "target_username",
+    "candidate_count",
+    "assigned_count",
+    "by_original_annotator_json",
+]
 
 
 def db_config() -> dict:
@@ -161,11 +173,39 @@ def _counts_by_annotator(rows: list[dict]) -> dict:
     return counts
 
 
+def append_audit_csv(result: dict, execute: bool, run_started_at: datetime, csv_path: Path) -> None:
+    """Append one structured audit row for each script run."""
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    row = {
+        "run_started_at_utc": run_started_at.isoformat(),
+        "mode": "execute" if execute else "dry_run",
+        "target_username": result["target"],
+        "candidate_count": int(result["candidates"]),
+        "assigned_count": int(result["assigned"]),
+        "by_original_annotator_json": json.dumps(
+            result["by_original_annotator"],
+            sort_keys=True,
+        ),
+    }
+    with csv_path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=AUDIT_COLUMNS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument(
+        "--audit-csv",
+        default=DEFAULT_AUDIT_CSV,
+        help="Append a per-run CSV audit row to this path.",
+    )
     args = parser.parse_args()
 
+    run_started_at = datetime.now(timezone.utc)
     load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
     conn = psycopg2.connect(**db_config())
     try:
@@ -176,6 +216,8 @@ def main() -> None:
         else:
             conn.rollback()
             print("Dry run only. No assignments created.")
+        append_audit_csv(result, args.execute, run_started_at, Path(args.audit_csv))
+        print(f"Audit CSV updated: {args.audit_csv}")
         print(result)
     except Exception:
         conn.rollback()
