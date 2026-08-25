@@ -52,6 +52,30 @@ review history.
 - The team size remains modest enough for Streamlit and the current connection
   pool.
 
+### DB Is Source of Truth for Annotation Counts (not S3)
+
+S3 JSON mirrors are written after each annotation save but are not guaranteed to
+be complete. Old JSON files from pre-wipe DB resets remain in S3 and inflate
+counts. Always query the DB `annotations` and `assignments` tables for accurate
+annotation statistics. The `annotation_manifest.csv` in S3 is the authoritative
+source for image-to-variety mapping only.
+
+### lovepreet123456 Is the Designated Redo Annotator
+
+All skipped-redo work routes to username `lovepreet123456`. All pending images
+from finished annotators were consolidated into this account on 2026-08-14.
+There are multiple "lovepreet" accounts in the system; `lovepreet123456` is the
+only one with active work. Scripts that reference the redo annotator hardcode
+this username.
+
+### One Annotator Per Image (No Multi-Annotator Overlap)
+
+The DB unique constraint `idx_assignments_one_primary_owner_per_image` enforces
+one primary assignment per image globally. As of 2026-08-25, every done image
+has exactly one annotator's label. Skipped-redo assignments are separate rows
+with `assignment_kind = 'skipped_redo'` and are not subject to the primary
+uniqueness constraint.
+
 ## Known Limitations
 
 - Generated passwords are stored in plaintext in `admin_visible_password` for

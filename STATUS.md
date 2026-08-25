@@ -1,6 +1,6 @@
 # Annotation Project Status
 
-Last updated: **2026-08-14**
+Last updated: **2026-08-25**
 
 ---
 
@@ -9,17 +9,17 @@ Last updated: **2026-08-14**
 | Metric | Count |
 |---|---|
 | Total images in DB | 11,040 |
-| Total annotations saved | 8,190 |
-| Completed (labeled) | 5,836 |
-| Pending (lovepreet123456's queue) | 4,401 |
-| Skipped (no label saved) | 2,354 |
+| Total annotation records | 9,305 |
+| Completed (labeled, unique images) | **6,554** |
+| Pending (lovepreet123456's queue) | **3,285** |
+| Skipped (no label saved) | 1,200 |
 
 ### Label Split (completed annotations)
 
 | Label | Count |
 |---|---|
-| No splits / cracks | 3,759 |
-| Splits / cracks | 2,077 |
+| No splits / cracks | 4,336 |
+| Splits / cracks | 2,218 |
 
 ---
 

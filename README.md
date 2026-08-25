@@ -3,8 +3,8 @@
 Production Streamlit applications for the MSU Bean Lab image annotation workflow.
 The system lets admins create annotators, distribute bean images from S3, monitor
 progress globally, export results, and route skipped images to a redo annotator.
-Annotators sign in, inspect each assigned image, mark it Good, Bad, or Skip, and
-draw polygon defects for bad images.
+Annotators sign in, inspect each assigned image, mark it "No splits / cracks"
+or "Splits / cracks", and draw polygon outlines over defect regions.
 
 ## Applications
 
@@ -31,6 +31,8 @@ overlay images shown in the annotator UI live under `boundary_images/`.
 
 Start here:
 
+- [**Current State**](docs/current-state.md) ← start here for project status
+- [**Changelog**](docs/CHANGELOG.md) ← recent changes
 - [Architecture](docs/ARCHITECTURE.md)
 - [Database](docs/DATABASE.md)
 - [Backend](docs/BACKEND.md)
