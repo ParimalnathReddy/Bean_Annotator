@@ -963,6 +963,8 @@ function doConfirm(){{
     const set=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;
     set.call(inp,data);
     inp.dispatchEvent(new window.parent.Event('input',{{bubbles:true}}));
+    inp.dispatchEvent(new window.parent.Event('change',{{bubbles:true}}));
+    inp.blur();
   }}catch(err){{console.error('Bean Annotator: confirm error',err);}}
 }}
 
@@ -1586,6 +1588,12 @@ def annotation_view() -> None:
 
     def _do_save(advance_to_next: bool, severity: int | None = None) -> None:
         sev = severity if severity is not None else int(cur_sev)
+        if sev == 2 and not defects:
+            st.error(
+                "Draw at least one polygon and click Confirm before saving a "
+                "Splits / cracks annotation."
+            )
+            return
         st.session_state[sev_key] = sev
         updated = {
             "annotation_version": ANNOTATION_VER,
@@ -1675,8 +1683,9 @@ def annotation_view() -> None:
             _do_save(advance_to_next=True, severity=1)
             st.rerun()
         if bad_clicked:
-            # Save severity=Bad then send to defect drawing, don't advance yet
-            _do_save(advance_to_next=False, severity=2)
+            # Do not save yet. A Bad image is complete only after at least
+            # one confirmed polygon reaches Python and is saved below.
+            st.session_state[sev_key] = 2
             st.session_state["_switch_to_panel"] = "Draw Defects"
             st.rerun()
         if skip_clicked:
@@ -1724,7 +1733,16 @@ def annotation_view() -> None:
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
                 st.rerun()
         with s_col:
-            if st.button("Save", type="primary", use_container_width=True):
+            if st.button(
+                "Save",
+                type="primary",
+                use_container_width=True,
+                disabled=(n_d == 0),
+                help=(
+                    "Draw a polygon and click Confirm in the canvas first."
+                    if n_d == 0 else None
+                ),
+            ):
                 _do_save(advance_to_next=True)
                 st.rerun()
 
