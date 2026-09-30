@@ -186,7 +186,10 @@ def _try_restore_session() -> dict | None:
     if not raw:
         return None
     try:
-        data = json.loads(raw)
+        if isinstance(raw, dict):
+            data = raw
+        else:
+            data = json.loads(raw)
         refresh_token = data["refresh_token"]
         username = data["username"]
     except Exception as exc:
