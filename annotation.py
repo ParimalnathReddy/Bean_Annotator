@@ -570,7 +570,7 @@ def draw_canvas(
 
 # ── Professional HTML5 Canvas annotation tool ─────────────────────────────────
 
-def _canvas_html(bg_url: str, iw: int, ih: int, polys_json: str, stroke: str, placeholder: str) -> str:
+def _canvas_html(bg_url: str, iw: int, ih: int, polys_json: str, stroke: str, placeholder: str, sync_label: str) -> str:
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -965,6 +965,12 @@ function doConfirm(){{
     inp.dispatchEvent(new window.parent.Event('input',{{bubbles:true}}));
     inp.dispatchEvent(new window.parent.Event('change',{{bubbles:true}}));
     inp.blur();
+    setTimeout(()=>{{
+      const btns=[...window.parent.document.querySelectorAll('button')];
+      const sync=btns.find(b=>b.textContent.trim()==='{sync_label}');
+      if(sync) sync.click();
+      else window.parent.postMessage({{isStreamlitMessage:true,type:'streamlit:rerun'}}, '*');
+    }}, 80);
   }}catch(err){{console.error('Bean Annotator: confirm error',err);}}
 }}
 
@@ -1032,6 +1038,7 @@ def draw_canvas_pro(
     bg_url = img_data_url(canvas_img)
 
     placeholder  = f"__cvs_{canvas_key}__"
+    sync_label   = f"__sync_{canvas_key}__"
     polys_json   = json.dumps(init_polys)
 
     # Hidden text input — CSS hides it; JS writes polygon JSON to it on Confirm
@@ -1041,6 +1048,28 @@ def draw_canvas_pro(
         unsafe_allow_html=True,
     )
     raw = st.text_input("cvs", key=result_key, placeholder=placeholder, label_visibility="collapsed")
+    sync_clicked = st.button(sync_label, key=f"_sync_btn_{canvas_key}")
+    components.html(
+        f"""
+        <script>
+        (function(){{
+          const label = {json.dumps(sync_label)};
+          function hide(){{
+            window.parent.document.querySelectorAll('button').forEach(function(b){{
+              if (b.textContent.trim() === label) {{
+                const wrap = b.closest('[data-testid="stButton"]') || b.parentElement;
+                if (wrap) wrap.style.display = 'none';
+              }}
+            }});
+          }}
+          hide();
+          setTimeout(hide, 100);
+          setTimeout(hide, 500);
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
     # Process newly confirmed polygon data sent from the canvas JS
     if raw and raw.strip() not in ("", "[]", "null"):
@@ -1050,9 +1079,11 @@ def draw_canvas_pro(
                 st.session_state[confirmed_key] = confirmed
         except Exception:
             pass
+    if sync_clicked:
+        st.rerun()
 
     components.html(
-        _canvas_html(bg_url, w0, h0, polys_json, stroke, placeholder),
+        _canvas_html(bg_url, w0, h0, polys_json, stroke, placeholder, sync_label),
         height=640,
         scrolling=False,
     )
@@ -1704,23 +1735,23 @@ def annotation_view() -> None:
 
 
     elif panel == "Draw Defects":
-        canvas_objects, canvas_scale = draw_canvas(
+        defects = draw_canvas_pro(
             img,
             canvas_key=f"cv_{mid}",
-            mode="polygon",
-            stroke=severity_color(cur_sev),
             saved_defects=ann.get("defects") or [],
+            stroke=severity_color(cur_sev),
         )
-        defects = filter_shapes(canvas_objects, canvas_scale)
         n_d = len(defects)
         if n_d:
             st.caption(
                 f"{n_d} polygon{'s' if n_d != 1 else ''} confirmed · "
+                "draw more or edit, then click **✓ Confirm** in the canvas · "
                 "click **Save** below to write to database"
             )
         else:
             st.caption(
-                "No polygons yet. Draw a polygon in the canvas above, then Save."
+                "No polygons yet. Draw in the canvas above, "
+                "then click **✓ Confirm** — then **Save**."
             )
 
     # ── Actions ──
