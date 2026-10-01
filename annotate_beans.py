@@ -32,8 +32,9 @@ from annotation import (
     annotation_view,
 )
 
-# Number of images to keep in the in-memory cache (current ± window on each side)
-_IMG_CACHE_WINDOW = 4
+# Number of images to keep in memory around the current bean.
+# Keep this small so login/first render does not wait on many S3 downloads.
+_IMG_CACHE_WINDOW = 1
 
 
 # ── Queue loader ──────────────────────────────────────────────────────────────
