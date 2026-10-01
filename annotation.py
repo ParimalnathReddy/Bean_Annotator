@@ -540,7 +540,7 @@ def draw_canvas(
             strokeColor=stroke,
             backgroundColor="",
             backgroundImageURL=bg_url,
-            realtimeUpdateStreamlit=(mode != "polygon"),
+            realtimeUpdateStreamlit=True,
             canvasHeight=ch,
             canvasWidth=cw,
             drawingMode=mode,
@@ -1704,23 +1704,23 @@ def annotation_view() -> None:
 
 
     elif panel == "Draw Defects":
-        defects = draw_canvas_pro(
+        canvas_objects, canvas_scale = draw_canvas(
             img,
             canvas_key=f"cv_{mid}",
-            saved_defects=ann.get("defects") or [],
+            mode="polygon",
             stroke=severity_color(cur_sev),
+            saved_defects=ann.get("defects") or [],
         )
+        defects = filter_shapes(canvas_objects, canvas_scale)
         n_d = len(defects)
         if n_d:
             st.caption(
                 f"{n_d} polygon{'s' if n_d != 1 else ''} confirmed · "
-                "draw more or edit, then click **✓ Confirm** in the canvas · "
                 "click **Save** below to write to database"
             )
         else:
             st.caption(
-                "No polygons yet. Draw in the canvas above, "
-                "then click **✓ Confirm** — then **Save**."
+                "No polygons yet. Draw a polygon in the canvas above, then Save."
             )
 
     # ── Actions ──
