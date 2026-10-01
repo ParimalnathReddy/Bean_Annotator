@@ -570,7 +570,7 @@ def draw_canvas(
 
 # ── Professional HTML5 Canvas annotation tool ─────────────────────────────────
 
-def _canvas_html(bg_url: str, iw: int, ih: int, polys_json: str, stroke: str, placeholder: str, sync_label: str) -> str:
+def _canvas_html(bg_url: str, iw: int, ih: int, polys_json: str, stroke: str, query_key: str) -> str:
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -645,7 +645,7 @@ const IW    = {iw};
 const IH    = {ih};
 const CLR   = `{stroke}`;
 const INIT  = {polys_json};
-const PHOLD = `{placeholder}`;
+const QKEY  = `{query_key}`;
 const HIT   = 10;  // vertex hit-test radius (CSS px)
 
 function hex2rgba(h,a){{
@@ -958,19 +958,9 @@ function setMode(m){{
 function doConfirm(){{
   const data=JSON.stringify(polys.map(p=>p.pts));
   try{{
-    const inp=window.parent.document.querySelector(`input[placeholder="${{PHOLD}}"]`);
-    if(!inp){{console.warn('Bean Annotator: confirm target not found');return;}}
-    const set=Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;
-    set.call(inp,data);
-    inp.dispatchEvent(new window.parent.Event('input',{{bubbles:true}}));
-    inp.dispatchEvent(new window.parent.Event('change',{{bubbles:true}}));
-    inp.blur();
-    setTimeout(()=>{{
-      const btns=[...window.parent.document.querySelectorAll('button')];
-      const sync=btns.find(b=>b.textContent.trim()==='{sync_label}');
-      if(sync) sync.click();
-      else window.parent.postMessage({{isStreamlitMessage:true,type:'streamlit:rerun'}}, '*');
-    }}, 80);
+    const url=new URL(window.parent.location.href);
+    url.searchParams.set(QKEY,data);
+    window.parent.location.replace(url.toString());
   }}catch(err){{console.error('Bean Annotator: confirm error',err);}}
 }}
 
@@ -1015,7 +1005,23 @@ def draw_canvas_pro(
     Returns confirmed polygon defects in original image coordinates.
     """
     confirmed_key = f"_cvd_{canvas_key}"
-    result_key    = f"_cvr_{canvas_key}"
+    query_key = f"poly_{canvas_key}"
+
+    raw_query = st.query_params.get(query_key)
+    if isinstance(raw_query, list):
+        raw_query = raw_query[0] if raw_query else None
+    if raw_query:
+        try:
+            confirmed = json.loads(raw_query)
+            if isinstance(confirmed, list):
+                st.session_state[confirmed_key] = confirmed
+        except Exception:
+            st.warning("Could not read the confirmed polygons. Please click Confirm again.")
+        finally:
+            try:
+                del st.query_params[query_key]
+            except Exception:
+                pass
 
     # Seed from saved defects if no confirmed state yet
     if confirmed_key in st.session_state:
@@ -1037,53 +1043,10 @@ def draw_canvas_pro(
         canvas_img = img
     bg_url = img_data_url(canvas_img)
 
-    placeholder  = f"__cvs_{canvas_key}__"
-    sync_label   = f"__sync_{canvas_key}__"
-    polys_json   = json.dumps(init_polys)
-
-    # Hidden text input — CSS hides it; JS writes polygon JSON to it on Confirm
-    st.markdown(
-        f'<style>[data-testid="stTextInput"]:has(input[placeholder="{placeholder}"])'
-        f'{{display:none!important;height:0!important;overflow:hidden!important;margin:0!important}}</style>',
-        unsafe_allow_html=True,
-    )
-    raw = st.text_input("cvs", key=result_key, placeholder=placeholder, label_visibility="collapsed")
-    sync_clicked = st.button(sync_label, key=f"_sync_btn_{canvas_key}")
-    components.html(
-        f"""
-        <script>
-        (function(){{
-          const label = {json.dumps(sync_label)};
-          function hide(){{
-            window.parent.document.querySelectorAll('button').forEach(function(b){{
-              if (b.textContent.trim() === label) {{
-                const wrap = b.closest('[data-testid="stButton"]') || b.parentElement;
-                if (wrap) wrap.style.display = 'none';
-              }}
-            }});
-          }}
-          hide();
-          setTimeout(hide, 100);
-          setTimeout(hide, 500);
-        }})();
-        </script>
-        """,
-        height=0,
-    )
-
-    # Process newly confirmed polygon data sent from the canvas JS
-    if raw and raw.strip() not in ("", "[]", "null"):
-        try:
-            confirmed = json.loads(raw)
-            if isinstance(confirmed, list):
-                st.session_state[confirmed_key] = confirmed
-        except Exception:
-            pass
-    if sync_clicked:
-        st.rerun()
+    polys_json = json.dumps(init_polys)
 
     components.html(
-        _canvas_html(bg_url, w0, h0, polys_json, stroke, placeholder, sync_label),
+        _canvas_html(bg_url, w0, h0, polys_json, stroke, query_key),
         height=640,
         scrolling=False,
     )
