@@ -119,14 +119,19 @@ def _set_auth_cookie(tokens: dict, user: dict) -> None:
         print(f"[AUTH_DEBUG] _set_auth_cookie: no RefreshToken in tokens dict for {user.get('username')!r}", flush=True)
         return
     payload = json.dumps({"refresh_token": refresh_token, "username": user["username"]})
-    _cookie_controller().set(
-        _AUTH_COOKIE_NAME,
-        payload,
-        max_age=_AUTH_COOKIE_MAX_AGE,
-        same_site="lax",
-        secure=True,
-    )
-    print(f"[AUTH_DEBUG] _set_auth_cookie: wrote cookie for {user['username']!r}", flush=True)
+    try:
+        _cookie_controller().set(
+            _AUTH_COOKIE_NAME,
+            payload,
+            max_age=_AUTH_COOKIE_MAX_AGE,
+            same_site="lax",
+            secure=True,
+        )
+        print(f"[AUTH_DEBUG] _set_auth_cookie: wrote cookie for {user['username']!r}", flush=True)
+    except Exception as exc:
+        # Cookie persistence is best-effort. A failed browser cookie write should
+        # not block a valid Cognito login for the current Streamlit session.
+        print(f"[AUTH_DEBUG] _set_auth_cookie: cookie write failed: {exc!r}", flush=True)
 
 
 def _clear_auth_cookie() -> None:
