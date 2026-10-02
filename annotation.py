@@ -24,6 +24,12 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
 
+
+_BEAN_POLYGON_CANVAS = components.declare_component(
+    "bean_polygon_canvas",
+    path=str(Path(__file__).parent / "components" / "bean_polygon_canvas"),
+)
+
 try:
     import streamlit.elements.image as st_image
     from streamlit.elements.lib.image_utils import image_to_url as _image_to_url
@@ -1005,23 +1011,6 @@ def draw_canvas_pro(
     Returns confirmed polygon defects in original image coordinates.
     """
     confirmed_key = f"_cvd_{canvas_key}"
-    query_key = f"poly_{canvas_key}"
-
-    raw_query = st.query_params.get(query_key)
-    if isinstance(raw_query, list):
-        raw_query = raw_query[0] if raw_query else None
-    if raw_query:
-        try:
-            confirmed = json.loads(raw_query)
-            if isinstance(confirmed, list):
-                st.session_state[confirmed_key] = confirmed
-        except Exception:
-            st.warning("Could not read the confirmed polygons. Please click Confirm again.")
-        finally:
-            try:
-                del st.query_params[query_key]
-            except Exception:
-                pass
 
     # Seed from saved defects if no confirmed state yet
     if confirmed_key in st.session_state:
@@ -1043,13 +1032,17 @@ def draw_canvas_pro(
         canvas_img = img
     bg_url = img_data_url(canvas_img)
 
-    polys_json = json.dumps(init_polys)
-
-    components.html(
-        _canvas_html(bg_url, w0, h0, polys_json, stroke, query_key),
-        height=640,
-        scrolling=False,
+    component_value = _BEAN_POLYGON_CANVAS(
+        bg_url=bg_url,
+        iw=w0,
+        ih=h0,
+        polys=init_polys,
+        stroke=stroke,
+        key=canvas_key,
+        default=None,
     )
+    if isinstance(component_value, list):
+        st.session_state[confirmed_key] = component_value
 
     # Build and return the current defect list
     current_polys = st.session_state.get(confirmed_key, init_polys)
