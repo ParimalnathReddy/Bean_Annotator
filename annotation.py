@@ -215,6 +215,9 @@ def get_ann(mask_id: str) -> dict[str, Any]:
 
 def save_ann(ann: dict[str, Any]) -> None:
     ann["timestamp"] = utc_now()
+    persist = st.session_state.get("_persist_annotation")
+    if persist:
+        persist(ann)
     st.session_state.setdefault("anns", {})[ann["mask_id"]] = ann
 
 
@@ -380,6 +383,8 @@ def blank_annotation(mask_id: str) -> dict[str, Any]:
 
 
 def is_done(ann: dict[str, Any]) -> bool:
+    if st.session_state.get("polygon_review"):
+        return bool(ann.get("defects")) and bool(ann.get("timestamp"))
     return bool(ann.get("skip", {}).get("skipped")) or ann.get("overall_severity") in SEVERITY
 
 
@@ -1466,6 +1471,8 @@ def annotation_view() -> None:
     mid  = mask_id_of(file)
 
     panel = sidebar(files, current_mid=mid)
+    if st.session_state.get("polygon_review"):
+        panel = "Draw Defects"
     ann   = get_ann(mid)
 
     try:
@@ -1493,8 +1500,10 @@ def annotation_view() -> None:
         )
         annotator_name = st.session_state.get("annotator") or "—"
         st.caption(f"Annotator: {annotator_name}  ·  {completed} of {total} done ({pct}%)")
+        if st.session_state.get("polygon_review"):
+            st.caption(f"Polygon Review: {completed} saved · {total - completed} remaining")
     with h_right:
-        if sev:
+        if sev and ann.get("timestamp"):
             meta = SEVERITY[sev]
             _html(
                 f'<div style="text-align:center;padding:8px 12px;border-radius:5px;background:{meta["color"]};color:{meta["fg"]};">'
@@ -1552,6 +1561,8 @@ def annotation_view() -> None:
         st.session_state[sev_key] = sev if sev in SEVERITY else 1
 
     cur_sev   = int(st.session_state.get(sev_key, 1))
+    if st.session_state.get("polygon_review"):
+        cur_sev = 2
 
     # Prefer canvas-confirmed polygons over the stale DB copy when available
     _canvas_confirmed = st.session_state.get(f"_cvd_cv_{mid}")
@@ -1594,7 +1605,11 @@ def annotation_view() -> None:
             "timestamp":          utc_now(),
             "annotator":          st.session_state.get("annotator", ""),
         }
-        save_ann(updated)
+        try:
+            save_ann(updated)
+        except Exception as exc:
+            st.error(f"Save failed. Your drawing is still available: {exc}")
+            return
         label = SEVERITY.get(sev, {}).get("label", sev)
         st.toast(f"Saved — {label}")
         if advance_to_next:
@@ -1716,7 +1731,8 @@ def annotation_view() -> None:
     if panel == "Draw Defects":
         p_col, s_col = st.columns([1.2, 1.2])
         with p_col:
-            if st.button("← Previous Step", use_container_width=True):
+            if st.button("← Previous Step", use_container_width=True,
+                         disabled=st.session_state.get("polygon_review", False)):
                 st.session_state["_switch_to_panel"] = "Inspect & Rate"
                 st.rerun()
         with s_col:

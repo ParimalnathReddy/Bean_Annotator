@@ -510,7 +510,7 @@ def reduce_pending_assignments(annotator_id: str, admin_id: str, target_total: i
             return cur.rowcount
 
 
-def get_annotator_queue(annotator_id: str) -> list[dict]:
+def get_annotator_queue(annotator_id: str, polygon_review: bool = False) -> list[dict]:
     """Load all assigned images + existing annotations for an annotator (resume flow)."""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -520,6 +520,8 @@ def get_annotator_queue(annotator_id: str) -> list[dict]:
                        a.status,
                        a.assigned_at,
                        a.assigned_by_admin,
+                       a.assignment_kind,
+                       a.source_assignment_id,
                        a.last_image_idx,
                        a.last_active_at,
                        i.id              AS image_id,
@@ -537,8 +539,9 @@ def get_annotator_queue(annotator_id: str) -> list[dict]:
                    JOIN jobs j ON j.id = i.job_id
                    LEFT JOIN annotations ann ON ann.assignment_id = a.id
                    WHERE a.annotator_id = %s
+                     AND ((a.assignment_kind = 'polygon_review') = %s)
                    ORDER BY a.assigned_at, i.filename""",
-                (annotator_id,),
+                (annotator_id, polygon_review),
             )
             return [dict(r) for r in cur.fetchall()]
 
@@ -568,6 +571,15 @@ def save_annotation(
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                "SELECT assignment_kind FROM assignments WHERE id = %s AND annotator_id = %s FOR UPDATE",
+                (assignment_id, annotator_id),
+            )
+            assignment = cur.fetchone()
+            if not assignment:
+                raise ValueError("This assignment does not belong to the annotator.")
+            if assignment[0] == 'polygon_review':
+                validate_polygon_review(overall_severity, defects, skip_reason)
+            cur.execute(
                 """INSERT INTO annotations
                        (assignment_id, annotator_id, overall_severity, overall_notes,
                         defects, skip_reason, saved_at)
@@ -593,6 +605,23 @@ def save_annotation(
                    WHERE id = %s""",
                 (status, assignment_id),
             )
+
+
+def validate_polygon_review(severity: int | None, defects: list, skip_reason: str | None) -> None:
+    import math
+    if severity != 2 or skip_reason or not defects:
+        raise ValueError("A polygon review requires a Bad rating and at least one polygon.")
+    for defect in defects:
+        points = defect.get("polygon", [])
+        if defect.get("shape") != "polygon" or len(points) < 3:
+            raise ValueError("Each defect must contain a valid polygon.")
+        coords = [(float(p['x']), float(p['y'])) for p in points]
+        if not all(math.isfinite(v) for point in coords for v in point):
+            raise ValueError("Polygon coordinates must be finite.")
+        area = sum(x * coords[(i + 1) % len(coords)][1] - coords[(i + 1) % len(coords)][0] * y
+                   for i, (x, y) in enumerate(coords))
+        if len(set(coords)) < 3 or abs(area) < 1e-8:
+            raise ValueError("Polygon must enclose an area.")
 
 
 # ── Admin progress ────────────────────────────────────────────────────────────

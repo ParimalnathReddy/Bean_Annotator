@@ -48,7 +48,7 @@ def _load_queue() -> None:
     db_ann = st.session_state["db_annotator"]
 
     with st.spinner("Loading your queue…"):
-        queue = get_annotator_queue(db_ann["id"])
+        queue = get_annotator_queue(db_ann["id"], st.session_state.get("polygon_review", False))
 
     if not queue:
         st.markdown("## No images assigned yet")
@@ -77,6 +77,8 @@ def _load_queue() -> None:
         s3_keys[mid]     = item["s3_key"]
         assignment_meta[mid] = {
             "assignment_id": str(item["assignment_id"]),
+            "assignment_kind": item["assignment_kind"],
+            "source_assignment_id": str(item["source_assignment_id"]) if item.get("source_assignment_id") else None,
             "assignment_status": item["status"],
             "assigned_at": str(item["assigned_at"]) if item.get("assigned_at") else None,
             "assigned_by_admin_id": str(item["assigned_by_admin"]) if item.get("assigned_by_admin") else None,
@@ -103,6 +105,8 @@ def _load_queue() -> None:
                 "timestamp": str(item["saved_at"]) if item.get("saved_at") else None,
                 "annotator": user["name"],
             }
+        elif st.session_state.get("polygon_review"):
+            anns[mid] = {"overall_severity": 2, "defects": [], "timestamp": None}
 
     st.session_state.update({
         "imgs":              {},        # populated lazily by _ensure_images()
@@ -114,7 +118,7 @@ def _load_queue() -> None:
         "assignments":       assignments,
         "assignment_meta":    assignment_meta,
         "s3_keys":           s3_keys,
-        "_last_synced_ts":   {},
+        "_last_synced_ts":   {mid: ann["timestamp"] for mid, ann in anns.items() if ann.get("timestamp")},
         "_last_synced_idx":  None,
     })
     st.rerun()
@@ -170,6 +174,19 @@ def _gray_placeholder() -> bytes:
 
 
 # ── DB sync ───────────────────────────────────────────────────────────────────
+
+def _persist_annotation(ann: dict) -> None:
+    mid = ann["mask_id"]
+    skip = ann.get("skip") or {}
+    db_save(
+        assignment_id=st.session_state["assignments"][mid],
+        annotator_id=st.session_state["db_annotator"]["id"],
+        overall_severity=ann.get("overall_severity"),
+        overall_notes=ann.get("overall_notes", ""),
+        defects=ann.get("defects") or [],
+        skip_reason=skip.get("reason") if skip.get("skipped") else None,
+    )
+
 
 def _sync_to_db() -> None:
     """At the start of each render, flush newly saved annotations to Postgres and S3."""
@@ -228,7 +245,7 @@ def _sync_to_db() -> None:
             ann    = current_anns.get(mid, {})
             status = (
                 "skipped"     if ann.get("skip", {}).get("skipped")
-                else "done"   if ann.get("overall_severity") is not None
+                else "done"   if ann.get("timestamp") and ann.get("overall_severity") is not None
                 else "in_progress"
             )
             update_assignment_cursor(assignment_id, idx, status)
@@ -246,6 +263,8 @@ def _annotation_payload(ann: dict, meta: dict, annotator: dict, skip_reason: str
             "id": meta.get("assignment_id"),
             "assigned_at": meta.get("assigned_at"),
             "assigned_by_admin_id": meta.get("assigned_by_admin_id"),
+            "kind": meta.get("assignment_kind"),
+            "source_assignment_id": meta.get("source_assignment_id"),
         },
         "annotator": {
             "id": str(annotator["id"]),
@@ -298,6 +317,19 @@ def main() -> None:
             email       = user["email"],
             role        = user["role"],
         )
+
+    st.session_state["_persist_annotation"] = _persist_annotation
+    with st.sidebar:
+        queue_mode = st.selectbox("Queue", ["Assigned Beans", "Bad Beans - Polygon Review"], key="queue_mode")
+    review = queue_mode == "Bad Beans - Polygon Review"
+    if review != st.session_state.get("polygon_review", False):
+        if st.session_state.get("ready"):
+            _sync_to_db()
+        for key in list(st.session_state):
+            if key.startswith(("sev_", "_cvd_", "cv_", "_canvas_")) or key in ("workflow_panel", "_switch_to_panel", "_last_rated"):
+                del st.session_state[key]
+        st.session_state["polygon_review"] = review
+        st.session_state["ready"] = False
 
     # 3. Load S3 image queue if not done yet (metadata only — no image bytes)
     if not st.session_state.get("ready"):
